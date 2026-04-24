@@ -1,8 +1,15 @@
 # TALLY_EXPORT
 
-Python ETL toolkit for Tally Prime / Tally.ERP 9
+ETL toolkit for Tally Prime / Tally.ERP 9 using the XML HTTP API.
 
-> **Python ETL toolkit for Tally Prime / Tally.ERP 9** — export groups, ledgers, and vouchers over the built-in XML HTTP API then run rich offline analyses: ledger classification, tax-group closure, voucher pattern detection, and per-ledger JSON slicing.
+Export groups, ledgers, and vouchers from Tally, then run offline analysis for
+classification, Duties & Taxes closure, voucher pattern detection, and per-ledger
+JSON generation.
+
+**Highlights**
+- Works with any Tally company and date range.
+- Supports large XML files with streaming parsers.
+- Produces both XML and enriched JSON outputs.
 
 ---
 
