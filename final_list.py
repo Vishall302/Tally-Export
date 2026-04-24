@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""
+Ledger names from vouchers_liability_no_expense_yes, excluding Duties & Taxes ledgers
+(duties_taxes_ledgers). Defaults: tally_ledgers_final.xml, daybook XML, tally_groups_final.xml
+beside this script; add --json for JSON output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from duties_taxes_ledgers import duties_taxes_parent_names, ledgers_with_parent_in
+from vouchers_liability_no_expense_yes import (
+    collect_matching_liability_names,
+    load_expense_and_liability_sets,
+)
+
+
+def main() -> None:
+    base = Path(__file__).resolve().parent
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--ledgers",
+        type=Path,
+        default=base / "tally_ledgers_final.xml",
+        help="Enriched TALLYLEDGERS XML (default: tally_ledgers_final.xml next to script)",
+    )
+    p.add_argument(
+        "--daybook",
+        type=Path,
+        default=base / "daybook_01042024_to_31032025.xml",
+        help="TALLYDAYBOOK XML (default: daybook next to script)",
+    )
+    p.add_argument(
+        "--groups-xml",
+        type=Path,
+        default=base / "tally_groups_final.xml",
+        help="Groups XML for Duties & Taxes closure (default: tally_groups_final.xml)",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a sorted JSON array instead of one name per line",
+    )
+    args = p.parse_args()
+
+    if not args.ledgers.is_file():
+        print(f"Ledgers file not found: {args.ledgers}", file=sys.stderr)
+        sys.exit(1)
+    if not args.daybook.is_file():
+        print(f"Daybook file not found: {args.daybook}", file=sys.stderr)
+        sys.exit(1)
+    if not args.groups_xml.is_file():
+        print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
+        sys.exit(1)
+
+    ledgers_path = str(args.ledgers)
+    expense_or_fixed, liability_or_current = load_expense_and_liability_sets(args.ledgers)
+    voucher_names = collect_matching_liability_names(
+        args.daybook, expense_or_fixed, liability_or_current
+    )
+
+    parent_names = duties_taxes_parent_names(str(args.groups_xml))
+    duties_names = set(ledgers_with_parent_in(ledgers_path, parent_names))
+
+    final_sorted = sorted(voucher_names - duties_names)
+
+    if args.json:
+        print(json.dumps(final_sorted, ensure_ascii=False, indent=2))
+    else:
+        for n in final_sorted:
+            print(n)
+
+
+if __name__ == "__main__":
+    main()

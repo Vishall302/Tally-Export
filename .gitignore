@@ -1,0 +1,8 @@
+# Data folders
+data/
+vouchers_by_final_list/
+vouchers_by_final_list_json/
+
+# Data files
+*.xml
+*.json
