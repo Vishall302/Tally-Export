@@ -23,7 +23,7 @@
   - [3. tally_daybook.py](#3-tally_daybookpy--voucher-register)
   - [4. list_liability_or_current_assets_ledgers.py](#4-list_liability_or_current_assets_ledgerspy)
   - [5. list_expense_or_fixed_asset_ledgers.py](#5-list_expense_or_fixed_asset_ledgerspy)
-  - [6. duties_taxes_ledgers.py](#6-duties_taxes_ledgerspy--duties--taxes-closure)
+  - [6. exclude_groups_ledgers.py](#6-exclude_groups_ledgerspy--exclude-groups-closure)
   - [7. vouchers_liability_no_expense_yes.py](#7-vouchers_liability_no_expense_yespy--cross-voucher-pattern)
   - [8. final_list.py](#8-final_listpy--voucher-pattern-ledgers-minus-duties--taxes)
   - [9. split_daybook_by_final_list.py](#9-split_daybook_by_final_listpy--per-ledger-daybook-slices)
@@ -58,7 +58,7 @@ The entire pipeline is designed for **any Tally company and any date range**. Si
 - **Chunked daybook export** — month-by-month to stay within Tally's HTTP timeout limits; deduplicates by GUID across chunks.
 - **Ledger deduplication & merging** — normalises whitespace, merges duplicate ledger names with union semantics across scalar and list fields.
 - **Streaming XML parsing** via `iterparse` + `elem.clear()` — handles multi-hundred-MB daybook files without loading the entire document into memory.
-- **Duties & Taxes BFS closure** — walks the group tree to collect all sub-groups of *Duties & Taxes*, then lists ledgers whose parent sits in that set.
+- **Exclude-groups BFS closure** — walks the group tree to collect all sub-groups of selected root groups (default: *Duties & Taxes*, *Cash-in-Hand*, *Bank Accounts*, *Branch / Divisions*), then lists ledgers whose parent sits in that set.
 - **Cross-voucher pattern detection** — finds vouchers that simultaneously debit an expense/fixed-asset ledger and credit a liability/current-asset ledger.
 - **Per-ledger daybook slicing** — one XML file per target ledger containing every voucher that references it.
 - **JSON export with canonical field resolution** — resolves GST, PAN, state, pincode from multiple Tally storage locations; records `field_sources` for auditability.
@@ -91,7 +91,7 @@ flowchart TB
     subgraph offline["🔍 Offline analysis — XML only, no Tally needed"]
         LL["list_liability_or_current_assets_ledgers.py"]
         LE["list_expense_or_fixed_asset_ledgers.py"]
-        DT["duties_taxes_ledgers.py"]
+        DT["exclude_groups_ledgers.py"]
         VX["vouchers_liability_no_expense_yes.py"]
         FL["final_list.py"]
         SP["split_daybook_by_final_list.py"]
@@ -160,9 +160,9 @@ sequenceDiagram
 
     Note over User,Output: Phase 2 — Offline Analysis (no Tally needed)
 
-    User->>Analysis: python duties_taxes_ledgers.py
+    User->>Analysis: python exclude_groups_ledgers.py
     Analysis->>XML: Read tally_groups_final.xml + tally_ledgers_final.xml
-    Analysis-->>User: Print Duties & Taxes ledger names
+    Analysis-->>User: Print excluded-group ledger names
 
     User->>Analysis: python final_list.py
     Analysis->>XML: Read groups + ledgers + daybook
@@ -262,7 +262,7 @@ python tally_groups.py
 
 > ⚠️ **Warning:** This script executes at import time (no `if __name__ == "__main__"` guard). Do **not** `import tally_groups` as a library unless you intend to trigger a live HTTP request.
 
-**Downstream consumers:** `duties_taxes_ledgers.py`, `final_list.py`, `split_daybook_by_final_list.py`.
+**Downstream consumers:** `exclude_groups_ledgers.py`, `final_list.py`, `split_daybook_by_final_list.py`.
 
 ---
 
@@ -378,11 +378,11 @@ python list_expense_or_fixed_asset_ledgers.py --xml /path/to/tally_ledgers_final
 
 ---
 
-### 6. `duties_taxes_ledgers.py` — Duties & Taxes closure
+### 6. `exclude_groups_ledgers.py` — Exclude-groups closure
 
 **Role:**
 
-1. Reads `tally_groups_final.xml` and performs a **BFS** over parent → child links to collect the full set of groups under the primary group **`Duties & Taxes`**.
+1. Reads `tally_groups_final.xml` and performs a **BFS** over parent → child links to collect the full set of groups under selected root groups (default: **`Duties & Taxes`**, **`Cash-in-Hand`**, **`Bank Accounts`**, **`Branch / Divisions`**).
 2. Reads `tally_ledgers_final.xml` and lists every ledger whose `PARENT` field appears in that group set.
 
 **CLI flags:**
@@ -393,13 +393,15 @@ python list_expense_or_fixed_asset_ledgers.py --xml /path/to/tally_ledgers_final
 | `--ledgers-xml PATH` | `tally_ledgers_final.xml` | Ledger master file |
 | `--groups-only` | off | Print group names only (no ledgers) |
 | `-v` | off | Verbose BFS level debugging |
+| `--roots GROUP [GROUP ...]` | default root list | Override / extend root groups to include in closure |
 
 **Run:**
 
 ```bash
-python duties_taxes_ledgers.py
-python duties_taxes_ledgers.py --groups-only -v
-python duties_taxes_ledgers.py --groups-xml ./tally_groups_final.xml --ledgers-xml ./tally_ledgers_final.xml
+python exclude_groups_ledgers.py
+python exclude_groups_ledgers.py --groups-only -v
+python exclude_groups_ledgers.py --groups-xml ./tally_groups_final.xml --ledgers-xml ./tally_ledgers_final.xml
+python exclude_groups_ledgers.py --roots "Duties & Taxes" "Cash-in-Hand" "Bank Accounts" "Branch / Divisions"
 ```
 
 **Downstream consumers:** `final_list.py` (uses its output as the exclusion set).
@@ -435,15 +437,15 @@ python vouchers_liability_no_expense_yes.py --daybook ./daybook_*.xml --ledgers 
 
 ---
 
-### 8. `final_list.py` — Voucher-pattern ledgers minus Duties & Taxes
+### 8. `final_list.py` — Voucher-pattern ledgers minus excluded groups
 
 **Role:** Produces the **set difference**:
 
 ```
-voucher_pattern_ledgers  −  duties_and_taxes_ledgers
+voucher_pattern_ledgers  −  excluded_group_ledgers
 ```
 
-Internally reimplements the logic of both `vouchers_liability_no_expense_yes.py` and `duties_taxes_ledgers.py` — no shell pipe required.
+Internally reimplements the logic of both `vouchers_liability_no_expense_yes.py` and `exclude_groups_ledgers.py` — no shell pipe required.
 
 **CLI flags:**
 
@@ -570,7 +572,7 @@ TALLY_EXPORT/
 ├── tally_daybook.py
 ├── list_liability_or_current_assets_ledgers.py
 ├── list_expense_or_fixed_asset_ledgers.py
-├── duties_taxes_ledgers.py
+├── exclude_groups_ledgers.py
 ├── vouchers_liability_no_expense_yes.py
 ├── final_list.py
 ├── split_daybook_by_final_list.py
@@ -762,7 +764,7 @@ The table below shows **typical** output sizes from one full financial year expo
 | `vouchers_by_final_list/` | Hundreds of XML files | One per target ledger after voucher-pattern filtering |
 | `vouchers_by_final_list_json/` | Matching JSON files | Mirror structure of the XML folder |
 
-**Why so many files?** The splitter creates one XML/JSON per ledger in the **final list** (voucher-pattern ledgers minus Duties & Taxes). For a company with hundreds of trade creditors or receivables this produces hundreds of files — one per counterparty — ready for downstream import or audit.
+**Why so many files?** The splitter creates one XML/JSON per ledger in the **final list** (voucher-pattern ledgers minus excluded-group ledgers). For a company with hundreds of trade creditors or receivables this produces hundreds of files — one per counterparty — ready for downstream import or audit.
 
 ---
 

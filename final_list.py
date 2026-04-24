@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Ledger names from vouchers_liability_no_expense_yes, excluding Duties & Taxes ledgers
-(duties_taxes_ledgers). Defaults: tally_ledgers_final.xml, daybook XML, tally_groups_final.xml
+Ledger names from vouchers_liability_no_expense_yes, excluding ledgers under selected
+group roots (exclude_groups_ledgers). Defaults: tally_ledgers_final.xml, daybook XML, tally_groups_final.xml
 beside this script; add --json for JSON output.
 """
 
@@ -12,7 +12,11 @@ import json
 import sys
 from pathlib import Path
 
-from duties_taxes_ledgers import duties_taxes_parent_names, ledgers_with_parent_in
+from exclude_groups_ledgers import (
+    DEFAULT_ROOT_GROUPS,
+    ledgers_with_parent_in,
+    parent_names_from_roots,
+)
 from vouchers_liability_no_expense_yes import (
     collect_matching_liability_names,
     load_expense_and_liability_sets,
@@ -38,7 +42,7 @@ def main() -> None:
         "--groups-xml",
         type=Path,
         default=base / "tally_groups_final.xml",
-        help="Groups XML for Duties & Taxes closure (default: tally_groups_final.xml)",
+        help="Groups XML for exclude-groups closure (default: tally_groups_final.xml)",
     )
     p.add_argument(
         "--json",
@@ -63,7 +67,9 @@ def main() -> None:
         args.daybook, expense_or_fixed, liability_or_current
     )
 
-    parent_names = duties_taxes_parent_names(str(args.groups_xml))
+    parent_names, _missing_roots = parent_names_from_roots(
+        str(args.groups_xml), list(DEFAULT_ROOT_GROUPS)
+    )
     duties_names = set(ledgers_with_parent_in(ledgers_path, parent_names))
 
     final_sorted = sorted(voucher_names - duties_names)

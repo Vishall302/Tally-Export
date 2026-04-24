@@ -17,7 +17,11 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
-from duties_taxes_ledgers import duties_taxes_parent_names, ledgers_with_parent_in
+from exclude_groups_ledgers import (
+    DEFAULT_ROOT_GROUPS,
+    ledgers_with_parent_in,
+    parent_names_from_roots,
+)
 from vouchers_liability_no_expense_yes import (
     collect_matching_liability_names,
     load_expense_and_liability_sets,
@@ -34,7 +38,9 @@ def load_final_ledger_names(
     voucher_names = collect_matching_liability_names(
         daybook, expense_or_fixed, liability_or_current
     )
-    parent_names = duties_taxes_parent_names(str(groups_xml))
+    parent_names, _missing_roots = parent_names_from_roots(
+        str(groups_xml), list(DEFAULT_ROOT_GROUPS)
+    )
     duties_names = set(ledgers_with_parent_in(ledgers_path, parent_names))
     return sorted(voucher_names - duties_names)
 
@@ -123,7 +129,7 @@ def main() -> None:
         "--groups-xml",
         type=Path,
         default=base / "tally_groups_final.xml",
-        help="Groups XML for Duties & Taxes closure",
+        help="Groups XML for exclude-groups closure",
     )
     p.add_argument(
         "--out-dir",

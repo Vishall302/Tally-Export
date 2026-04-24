@@ -2,20 +2,22 @@
 """
 What this script does
 ---------------------
-Reads Tally-export XML and works with the account group "Duties & Taxes" and everything
-nested under it in the group tree. You can either list those group names, or list every
+Reads Tally-export XML and works with one or more account-group roots (for example
+"Duties & Taxes", "Cash-in-Hand", "Bank Accounts", "Branch / Divisions") and everything
+nested under them in the group tree. You can either list those group names, or list every
 ledger that sits directly under one of those groups (matched by the ledger's PARENT).
 
 How it works (short)
 --------------------
-1. From the groups file, it finds all group names that are "Duties & Taxes" or a child,
-   grandchild, etc. of that group (following PARENT links downward).
+1. From the groups file, it finds all group names under selected root groups (by default:
+   "Duties & Taxes", "Cash-in-Hand", "Bank Accounts", "Branch / Divisions"), including
+   children, grandchildren, etc. (following PARENT links downward).
 2. In ledger mode, it scans the ledgers file and prints each ledger's NAME when its
    <PARENT> text equals one of those group names.
 
 Modes
 -----
-  Default: print ledger names (one per line) tied to Duties & Taxes and its subgroups.
+  Default: print ledger names (one per line) tied to selected root groups and subgroups.
   --groups-only (-G): print only the group names in that subtree (sorted).
   -v with -G: print BFS levels on stderr for debugging.
 
@@ -25,18 +27,30 @@ Inputs / defaults
   You can override paths with --groups-xml and --ledgers-xml.
 
 Optional: give a text file (one group name per line) or pipe names on stdin to use as the
-parent set instead of the auto "Duties & Taxes" closure.
+parent set instead of the auto closure from selected roots.
 
 XML shape: groups use <GROUP><NAME> / <PARENT>; ledgers use <LEDGER NAME="..."><PARENT>.
 """
 
 import argparse
+import re
 import sys
 import xml.etree.ElementTree as ET
 
 
-# Tally primary group this script is anchored to (must match spelling in XML).
-ROOT_NAME = "Duties & Taxes"
+# Default Tally roots this script is anchored to (must match spelling in XML).
+DEFAULT_ROOT_GROUPS = (
+    "Duties & Taxes",
+    "Cash-in-Hand",
+    "Bank Accounts",
+    "Branch / Divisions",
+)
+
+
+def normalize_group_name(name: str) -> str:
+    """Case-insensitive matching helper for root-name lookup."""
+    s = re.sub(r"\s*([/&])\s*", r" \1 ", name)
+    return " ".join(s.split()).casefold()
 
 
 def load_parent_name_pairs(xml_path: str) -> list[tuple[str, str]]:
@@ -82,11 +96,40 @@ def collect_descendants(pairs: list[tuple[str, str]], root: str) -> tuple[set[st
     return all_under, levels
 
 
-def duties_taxes_parent_names(groups_xml: str) -> set[str]:
-    """Root name plus every descendant group under ROOT_NAME (used as ledger parent filter)."""
+def resolve_root_names(
+    pairs: list[tuple[str, str]], requested_roots: list[str]
+) -> tuple[list[str], list[str]]:
+    """Map requested roots to exact XML names using case-insensitive matching."""
+    existing_names = {name for name, _ in pairs}
+    by_normalized = {normalize_group_name(name): name for name in existing_names}
+    resolved: list[str] = []
+    missing: list[str] = []
+    for requested in requested_roots:
+        exact = (
+            requested
+            if requested in existing_names
+            else by_normalized.get(normalize_group_name(requested))
+        )
+        if exact is None:
+            missing.append(requested)
+            continue
+        resolved.append(exact)
+    # Keep order stable but remove duplicates.
+    seen: set[str] = set()
+    ordered_unique = [name for name in resolved if not (name in seen or seen.add(name))]
+    return ordered_unique, missing
+
+
+def parent_names_from_roots(groups_xml: str, roots: list[str]) -> tuple[set[str], list[str]]:
+    """Root names plus descendants under each root (used as ledger parent filter)."""
     pairs = load_parent_name_pairs(groups_xml)
-    descendants, _ = collect_descendants(pairs, ROOT_NAME)
-    return descendants | {ROOT_NAME}
+    resolved_roots, missing_roots = resolve_root_names(pairs, roots)
+    combined: set[str] = set()
+    for root_name in resolved_roots:
+        descendants, _ = collect_descendants(pairs, root_name)
+        combined.update(descendants)
+        combined.add(root_name)
+    return combined, missing_roots
 
 
 def load_group_names(path: str | None) -> set[str]:
@@ -126,22 +169,38 @@ def ledgers_with_parent_in(xml_path: str, parent_names: set[str]) -> list[str]:
     return sorted(set(out))
 
 
-def cmd_groups_only(groups_xml: str, verbose: bool) -> int:
-    """Emit sorted group names under Duties & Taxes; -v mirrors BFS depth on stderr."""
+def cmd_groups_only(groups_xml: str, roots: list[str], verbose: bool) -> int:
+    """Emit sorted group names under selected roots; -v mirrors BFS depth on stderr."""
     pairs = load_parent_name_pairs(groups_xml)
-    descendants, levels = collect_descendants(pairs, ROOT_NAME)
-    combined = sorted(descendants | {ROOT_NAME})
+    roots, missing_roots = resolve_root_names(pairs, roots)
+    if missing_roots:
+        print(
+            f"exclude_groups_ledgers: root groups not found in XML: {', '.join(missing_roots)}",
+            file=sys.stderr,
+        )
+    combined: set[str] = set()
+    root_levels: list[tuple[str, list[list[str]]]] = []
+    for root_name in roots:
+        descendants, levels = collect_descendants(pairs, root_name)
+        combined.update(descendants)
+        combined.add(root_name)
+        root_levels.append((root_name, levels))
+    combined_sorted = sorted(combined)
 
     if verbose:
-        print(f"Level 0 (root): {ROOT_NAME}", file=sys.stderr)
-        for i, lvl in enumerate(levels, start=1):
-            print(f"Level {i} ({len(lvl)} new):", file=sys.stderr)
-            for n in lvl:
-                print(f"  {n}", file=sys.stderr)
-        print(file=sys.stderr)
-        print(f"Total unique names (including root): {len(combined)}", file=sys.stderr)
+        for root_name, levels in root_levels:
+            print(f"Level 0 (root): {root_name}", file=sys.stderr)
+            for i, lvl in enumerate(levels, start=1):
+                print(f"Level {i} ({len(lvl)} new):", file=sys.stderr)
+                for n in lvl:
+                    print(f"  {n}", file=sys.stderr)
+            print(file=sys.stderr)
+        print(
+            f"Total unique names (including roots): {len(combined_sorted)}",
+            file=sys.stderr,
+        )
 
-    for name in combined:
+    for name in combined_sorted:
         print(name)
     return 0
 
@@ -149,6 +208,7 @@ def cmd_groups_only(groups_xml: str, verbose: bool) -> int:
 def cmd_ledgers(
     groups_xml: str,
     ledgers_xml: str,
+    roots: list[str],
     parent_list_path: str | None,
 ) -> int:
     # Parent set: explicit file > stdin pipe > auto closure from groups_xml.
@@ -157,10 +217,15 @@ def cmd_ledgers(
     elif not sys.stdin.isatty():
         parent_names = load_group_names(None)
     else:
-        parent_names = duties_taxes_parent_names(groups_xml)
+        parent_names, missing_roots = parent_names_from_roots(groups_xml, roots)
+        if missing_roots:
+            print(
+                f"exclude_groups_ledgers: root groups not found in XML: {', '.join(missing_roots)}",
+                file=sys.stderr,
+            )
 
     if not parent_names:
-        print("duties_taxes_ledgers: no parent group names loaded", file=sys.stderr)
+        print("exclude_groups_ledgers: no parent group names loaded", file=sys.stderr)
         return 1
 
     for n in ledgers_with_parent_in(ledgers_xml, parent_names):
@@ -172,21 +237,31 @@ def main() -> int:
     # See module docstring; data_file meaning depends on --groups-only.
     parser = argparse.ArgumentParser(
         description=(
-            "Duties & Taxes: print group closure (--groups-only), or print ledgers whose "
-            "PARENT is in that group set (default)."
+            "Group closure utility: print group closure (--groups-only), or print ledgers "
+            "whose PARENT is in that group set (default)."
         )
     )
     parser.add_argument(
         "-G",
         "--groups-only",
         action="store_true",
-        help="Print group names under 'Duties & Taxes' only (no ledger scan).",
+        help="Print group names under selected roots only (no ledger scan).",
     )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="With --groups-only: print each BFS level on stderr.",
+    )
+    parser.add_argument(
+        "--roots",
+        nargs="+",
+        default=list(DEFAULT_ROOT_GROUPS),
+        metavar="GROUP",
+        help=(
+            "Root group names to expand (default: Duties & Taxes, Cash-in-Hand, "
+            "Bank Accounts, Branch / Divisions). Add more names for future groups."
+        ),
     )
     parser.add_argument(
         "--groups-xml",
@@ -208,17 +283,17 @@ def main() -> int:
         help=(
             "With --groups-only: optional path to groups XML (overrides --groups-xml). "
             "Without --groups-only: optional file of parent group names (one per line); "
-            "if omitted, use stdin when piped, else built-in Duties & Taxes closure."
+            "if omitted, use stdin when piped, else closure from --roots."
         ),
     )
     args = parser.parse_args()
 
     if args.groups_only:
         groups_xml = args.data_file or args.groups_xml
-        return cmd_groups_only(groups_xml, args.verbose)
+        return cmd_groups_only(groups_xml, args.roots, args.verbose)
 
     groups_xml = args.groups_xml
-    return cmd_ledgers(groups_xml, args.ledgers_xml, args.data_file)
+    return cmd_ledgers(groups_xml, args.ledgers_xml, args.roots, args.data_file)
 
 
 if __name__ == "__main__":
