@@ -6,3 +6,7 @@ vouchers_by_final_list_json/
 # Data files
 *.xml
 *.json
+
+.DS_Store
+__pycache__/
+*.pyc
