@@ -35,7 +35,9 @@ Across the whole daybook, names are **deduplicated** (union), then **sorted** fo
 
 Ledger classification (must match the two list scripts)
 --------------------------------------------------------
-  - Expense / Fixed Assets set: ``NATURE == "Expense"`` OR ``ROOTPRIMARY == "Fixed Assets"``.
+  - Expense / Fixed Assets set: ``NATURE == "Expense"`` OR ``ROOTPRIMARY == "Fixed Assets"``,
+    excluding names that contain ``discount`` (e.g. "Discount", "Discount Allowed",
+    "Discount Aalowed") or ``round off`` / ``roundoff``.
   - Liability / Current Assets set: ``NATURE == "Liability"`` OR ``ROOTPRIMARY == "Current Assets"``.
 
 Performance
@@ -71,6 +73,18 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
+def is_excluded_expense_name(name: str) -> bool:
+    """
+    Return True for expense/fixed-asset ledger names that must be ignored.
+
+    Excludes discount variants (contains "discount") and round-off variants
+    ("round off", "roundoff", punctuation/spacing variants).
+    """
+    lowered = name.casefold()
+    compact = "".join(ch for ch in lowered if ch.isalnum())
+    return "discount" in lowered or "round off" in lowered or "roundoff" in compact
+
+
 def load_expense_and_liability_sets(ledgers_xml: Path) -> tuple[set[str], set[str]]:
     """
     Build two sets of ledger display names from the enriched ledgers XML.
@@ -93,7 +107,7 @@ def load_expense_and_liability_sets(ledgers_xml: Path) -> tuple[set[str], set[st
             continue
         nature = (elem.findtext("NATURE") or "").strip()
         rootprimary = (elem.findtext("ROOTPRIMARY") or "").strip()
-        if nature == "Expense" or rootprimary == "Fixed Assets":
+        if (nature == "Expense" or rootprimary == "Fixed Assets") and not is_excluded_expense_name(name):
             expense_or_fixed.add(name)
         if nature == "Liability" or rootprimary == "Current Assets":
             liability_or_current.add(name)

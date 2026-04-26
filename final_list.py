@@ -3,6 +3,9 @@
 Ledger names from vouchers_liability_no_expense_yes, excluding ledgers under selected
 group roots (exclude_groups_ledgers). Defaults: tally_ledgers_final.xml, daybook XML, tally_groups_final.xml
 beside this script; add --json for JSON output.
+
+Expense/fixed-asset matching is inherited from vouchers_liability_no_expense_yes.py,
+including exclusion of discount/round-off ledger names.
 """
 
 from __future__ import annotations

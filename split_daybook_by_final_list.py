@@ -7,6 +7,9 @@ voucher, or ``PARTYLEDGERNAME`` on the voucher root).
 
 Output files go under a folder (default: ``vouchers_by_final_list``) next to this script.
 Filenames are sanitized copies of ledger names (unsafe characters replaced).
+
+Inherited filtering from final_list.py includes exclusion of discount/round-off
+ledgers in the expense/fixed-asset side of the voucher pattern.
 """
 
 from __future__ import annotations

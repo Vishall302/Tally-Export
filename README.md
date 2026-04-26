@@ -362,6 +362,10 @@ Uses `iterparse` — safe for large ledger files.
 - `NATURE == "Expense"`, **or**
 - `ROOTPRIMARY == "Fixed Assets"`
 
+Then excludes ledger names matching discount/round-off patterns:
+- any name containing `discount` (for example `Discount`, `Discount Allowed`, `Discount Aalowed`)
+- `round off` and `roundoff` variants (case-insensitive, spacing/punctuation tolerant)
+
 **CLI flags:**
 
 | Flag | Default | Effect |
@@ -413,7 +417,8 @@ python exclude_groups_ledgers.py --roots "Duties & Taxes" "Cash-in-Hand" "Bank A
 **Role:** Detects vouchers that match **both** of these conditions simultaneously:
 
 1. At least one entry credits a **liability / current-asset** ledger (`ISDEEMEDPOSITIVE == "No"`)
-2. At least one entry debits an **expense / fixed-asset** ledger (`ISDEEMEDPOSITIVE == "Yes"`)
+2. At least one entry debits an **expense / fixed-asset** ledger (`ISDEEMEDPOSITIVE == "Yes"`),
+   after excluding discount/round-off ledger names (`discount*`, `round off`, `roundoff`)
 
 Prints the **distinct liability/current-asset ledger names** from all matching vouchers, sorted.
 
@@ -637,7 +642,8 @@ ISDEEMEDPOSITIVE = "No"   →  credit-like (decreases asset / increases liabilit
 ```
 
 A voucher **matches** only if it contains **both**:
-- An entry with `ISDEEMEDPOSITIVE == "Yes"` on an **expense or fixed-asset** ledger, **and**
+- An entry with `ISDEEMEDPOSITIVE == "Yes"` on an **expense or fixed-asset** ledger
+  (excluding `discount*` and `round off` / `roundoff` names), **and**
 - An entry with `ISDEEMEDPOSITIVE == "No"` on a **liability or current-asset** ledger.
 
 The output collects the liability/current-asset names from condition 2, unioned across all matching vouchers.
