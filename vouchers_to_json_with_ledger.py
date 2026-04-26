@@ -1,23 +1,72 @@
 #!/usr/bin/env python3
 """
-Convert each ``vouchers_by_final_list/*.xml`` daybook subset to JSON, prepending
-master details for that ledger from ``tally_ledgers_final.xml``. Tally often stores
-GST, PAN, state, pincode, etc. under **several** tags (for example ``PARTYGSTIN``,
-``LEDGSTREGDETAILS.LIST`` / ``GSTIN``, repeated registration blocks); this script
-resolves one canonical value per concept and records optional ``*_all_distinct`` /
-``field_sources`` when multiple differing values exist.
+Build per-ledger JSON payloads from Tally daybook XML exports.
 
-Input filenames are derived from ledger names (see ``split_daybook_by_final_list.py``);
-the file stem must match the ``NAME`` attribute on ``<LEDGER>`` in the master file.
+Inputs
+------
+1) ``tally_ledgers_final.xml`` (master ledger dump)
+   - Contains ``<LEDGER>`` records used for static details:
+     group hierarchy, tax identity fields, address/state, etc.
+2) ``vouchers_by_final_list/*.xml``
+   - Per-ledger ``<TALLYDAYBOOK>`` files produced earlier in your pipeline.
+   - Filename stem is treated as ledger key.
 
-Output default: ``vouchers_by_final_list_json/`` next to this script (mirrors input names
-with ``.json`` extension). Uses only the standard library.
+Working (step by step)
+----------------------
+1) Parse master XML once and build an in-memory index:
+   ``LEDGER NAME -> flattened ledger_master fields``.
+2) Scan all voucher XML files in ``vouchers_by_final_list``.
+3) For each voucher file:
+   - derive ledger key from filename stem;
+   - fetch matching master ledger from index;
+   - if missing, keep processing and attach ``_lookup_error``;
+   - parse ``<TALLYDAYBOOK>`` and recursively convert XML to JSON objects.
+4) Merge both sections into one payload:
+   ``{"ledger_master": ..., "daybook": ...}``.
+5) Write one JSON file per voucher file in output directory.
+
+How ledger matching works
+-------------------------
+The voucher filename stem must equal the ``NAME`` attribute of a ``<LEDGER>`` node in
+the master file. Example: ``A.K. Associates.xml`` -> lookup ``<LEDGER NAME="A.K. Associates">``.
+If no match is found, output still gets written with a ``_lookup_error`` marker under
+``ledger_master`` so downstream processing can detect missing master rows.
+
+Field normalization behavior
+----------------------------
+Tally can store the same business fact in multiple places (for example GSTIN in
+``PARTYGSTIN`` and in repeated ``LEDGSTREGDETAILS.LIST/GSTIN`` blocks). This script:
+- chooses one canonical value per concept (GSTIN, PAN, state, etc.) using fixed
+  preference order;
+- preserves traceability in ``field_sources`` (which tag supplied the chosen value);
+- records ``*_all_distinct`` arrays when conflicting non-empty values are present.
+
+Output
+------
+For each input voucher XML, output JSON contains:
+- ``ledger_master``: flattened master metadata for that ledger;
+- ``daybook``: full ``<TALLYDAYBOOK>`` converted recursively to JSON-friendly objects.
+
+Output files are written to ``vouchers_by_final_list_json/`` by default, using the same
+base filename with ``.json`` extension. The script uses only Python standard library
+modules and supports ``--dry-run`` for validation without writing files.
+
+CLI usage
+---------
+- Default run:
+  ``python vouchers_to_json_with_ledger.py``
+- Custom paths:
+  ``python vouchers_to_json_with_ledger.py --ledgers tally_ledgers_final.xml --vouchers-dir vouchers_by_final_list --output-dir vouchers_by_final_list_json``
+- Validation only (no write):
+  ``python vouchers_to_json_with_ledger.py --dry-run``
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import re
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -92,6 +141,7 @@ def _collect_pan_values(ledger: ET.Element) -> list[str]:
 
 
 def _resolve_gst_registration_type(ledger: ET.Element) -> tuple[str, str]:
+    # Preference order matters: the first non-empty value wins.
     seq: list[tuple[str, str]] = []
     v = _direct_text(ledger, "GSTREGISTRATIONTYPE")
     if v:
@@ -186,6 +236,7 @@ def extract_ledger_master_fields(ledger: ET.Element) -> dict[str, Any]:
         if el is not None and el.text and el.text.strip():
             out[tag] = el.text.strip()
 
+    # Collect all GSTIN candidates and pick a canonical value while retaining provenance.
     gst_pairs = _collect_gstin_source_pairs(ledger)
     gst_distinct = _ordered_distinct([v for _src, v in gst_pairs])
     if gst_distinct:
@@ -199,6 +250,7 @@ def extract_ledger_master_fields(ledger: ET.Element) -> dict[str, Any]:
                 sources["GSTIN"] = src
                 break
 
+    # PAN can be repeated across nested blocks in Tally exports.
     pans = _ordered_distinct(_collect_pan_values(ledger))
     direct_pan = _direct_text(ledger, "INCOMETAXNUMBER")
     if pans:
@@ -251,21 +303,86 @@ def extract_ledger_master_fields(ledger: ET.Element) -> dict[str, Any]:
     return out
 
 
+def _sanitize_xml_for_iterparse(raw: bytes) -> bytes:
+    """
+    Best-effort cleanup for malformed Tally exports before XML parsing.
+    - Fixes bad opening tags like <GSTTYPEOFSUPPLY'> -> <GSTTYPEOFSUPPLY>
+    - Removes control bytes disallowed by XML 1.0
+    """
+    cleaned = re.sub(rb"<([A-Za-z_][\w.\-:]*)'>", rb"<\1>", raw)
+    return re.sub(rb"[\x00-\x08\x0B\x0C\x0E-\x1F]", b"", cleaned)
+
+
+def _normalize_ledger_key(name: str) -> str:
+    """
+    Normalize ledger names for tolerant matching across filename/master variants.
+    Examples handled: M_S <-> M/S, A_c <-> A/C, punctuation/space differences.
+    """
+    s = name.strip().lower()
+    s = s.replace("&amp;", "&")
+    s = s.replace("m/s", "ms").replace("m_s", "ms")
+    s = s.replace("a/c", "ac").replace("a_c", "ac")
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _build_normalized_ledger_index(
+    ledger_index: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """
+    Build normalized key -> master row map. First seen wins on key collisions.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for raw_name, details in ledger_index.items():
+        key = _normalize_ledger_key(raw_name)
+        if key and key not in out:
+            out[key] = details
+    return out
+
+
+def _lookup_ledger_master(
+    ledger_name: str,
+    ledger_index: dict[str, dict[str, Any]],
+    normalized_ledger_index: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    exact = ledger_index.get(ledger_name)
+    if exact is not None:
+        return exact
+    return normalized_ledger_index.get(_normalize_ledger_key(ledger_name))
+
+
 def load_ledger_master_index(ledgers_xml: Path) -> dict[str, dict[str, Any]]:
     """Parse tally_ledgers_final.xml once; map LEDGER NAME -> detail dict."""
     index: dict[str, dict[str, Any]] = {}
-    for _event, elem in ET.iterparse(str(ledgers_xml), events=("end",)):
-        if elem.tag != "LEDGER":
-            continue
-        raw_name = (elem.attrib.get("NAME") or "").strip()
-        if raw_name:
-            index[raw_name] = extract_ledger_master_fields(elem)
-        elem.clear()
+
+    def _consume(source: Any) -> None:
+        for _event, elem in ET.iterparse(source, events=("end",)):
+            if elem.tag != "LEDGER":
+                continue
+            raw_name = (elem.attrib.get("NAME") or "").strip()
+            if raw_name:
+                index[raw_name] = extract_ledger_master_fields(elem)
+            elem.clear()
+
+    try:
+        _consume(str(ledgers_xml))
+    except ET.ParseError as exc:
+        # Some Tally exports contain malformed tokens; sanitize and retry so processing continues.
+        print(
+            f"Warning: malformed XML in {ledgers_xml} ({exc}); retrying with sanitization.",
+            file=sys.stderr,
+        )
+        sanitized = _sanitize_xml_for_iterparse(ledgers_xml.read_bytes())
+        _consume(io.BytesIO(sanitized))
     return index
 
 
 def _element_to_obj(el: ET.Element) -> Any:
     """Convert an Element subtree to JSON-serializable dict / list / str / null."""
+    # Conversion policy:
+    # - leaf node => text (or null if blank)
+    # - attributes are kept with "@attr" keys
+    # - when a node has both attributes and text, text is stored under "_text"
+    # - repeated child tags become lists; singleton tags stay scalar objects
     children = list(el)
     attribs = {f"@{k}": v for k, v in el.attrib.items()}
     if not children:
@@ -287,26 +404,61 @@ def _element_to_obj(el: ET.Element) -> Any:
 
 
 def daybook_xml_to_json_structure(daybook_root: ET.Element) -> dict[str, Any]:
+    # Guard against unexpected XML shape early so downstream output is predictable.
     if daybook_root.tag != "TALLYDAYBOOK":
         raise ValueError(f"Expected TALLYDAYBOOK root, got {daybook_root.tag!r}")
     return _element_to_obj(daybook_root)
 
 
+def _inject_ledger_type_in_entries(
+    node: Any,
+    ledger_index: dict[str, dict[str, Any]],
+    normalized_ledger_index: dict[str, dict[str, Any]],
+) -> None:
+    """
+    Walk the daybook JSON tree and add Ledger_type to ledger-entry objects.
+    Any object with LEDGERNAME is treated as an entry candidate.
+    """
+    if isinstance(node, dict):
+        ledger_name = node.get("LEDGERNAME")
+        if isinstance(ledger_name, str) and ledger_name.strip():
+            master = _lookup_ledger_master(
+                ledger_name.strip(), ledger_index, normalized_ledger_index
+            )
+            nature = ""
+            if master is not None:
+                raw_nature = master.get("NATURE")
+                if isinstance(raw_nature, str):
+                    nature = raw_nature
+            node["Ledger_type"] = nature
+        for value in node.values():
+            _inject_ledger_type_in_entries(value, ledger_index, normalized_ledger_index)
+        return
+
+    if isinstance(node, list):
+        for item in node:
+            _inject_ledger_type_in_entries(item, ledger_index, normalized_ledger_index)
+
+
 def convert_one_voucher_file(
     voucher_xml: Path,
     ledger_index: dict[str, dict[str, Any]],
+    normalized_ledger_index: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    # File stem is expected to match <LEDGER NAME="..."> in master XML.
     stem = voucher_xml.stem
-    ledger_master = ledger_index.get(stem)
+    ledger_master = _lookup_ledger_master(stem, ledger_index, normalized_ledger_index)
     if ledger_master is None:
         ledger_master = {
             "NAME": stem,
             "_lookup_error": f"No <LEDGER NAME={stem!r}> in master file",
         }
 
+    # Parse the per-ledger daybook XML and serialize it into JSON-friendly primitives.
     tree = ET.parse(voucher_xml)
     root = tree.getroot()
     daybook_json = daybook_xml_to_json_structure(root)
+    _inject_ledger_type_in_entries(daybook_json, ledger_index, normalized_ledger_index)
 
     return {
         "ledger_master": ledger_master,
@@ -350,8 +502,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Vouchers folder not found: {args.vouchers_dir}", file=sys.stderr)
         return 1
 
+    # Build an in-memory NAME -> master-details index once, then reuse for all files.
     print(f"Loading {args.ledgers} ...", file=sys.stderr)
     ledger_index = load_ledger_master_index(args.ledgers)
+    # Required for tolerant lookups when voucher filename stem differs by punctuation/casing.
+    normalized_ledger_index = _build_normalized_ledger_index(ledger_index)
     print(f"Indexed {len(ledger_index)} ledgers.", file=sys.stderr)
 
     xml_files = sorted(args.vouchers_dir.glob("*.xml"))
@@ -359,9 +514,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No XML files in {args.vouchers_dir}", file=sys.stderr)
         return 1
 
+    # Pre-compute missing NAME matches to surface quality issues before writing outputs.
     missing_masters = 0
     for xf in xml_files:
-        if xf.stem not in ledger_index:
+        if _lookup_ledger_master(xf.stem, ledger_index, normalized_ledger_index) is None:
             missing_masters += 1
 
     print(f"Found {len(xml_files)} voucher XML files.", file=sys.stderr)
@@ -375,9 +531,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return 0
 
+    # Convert each XML file independently; one output JSON per input stem.
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for xf in xml_files:
-        data = convert_one_voucher_file(xf, ledger_index)
+        data = convert_one_voucher_file(xf, ledger_index, normalized_ledger_index)
         out_path = args.output_dir / f"{xf.stem}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w", encoding="utf-8") as f:
