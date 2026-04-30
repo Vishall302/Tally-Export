@@ -1,0 +1,186 @@
+[
+  {
+    "id": 1,
+    "name": "Discount allowed and received",
+    "intent": "Ledgers that record trade or cash discounts given to customers or received from vendors. These are contra-revenue or contra-expense adjustments arising from commercial settlements, not payments for any service or work. No TDS applies because no service is being rendered — it's simply a price reduction.",
+    "keywords": [
+      "discount allowed", "discount received", "discount given", "discount earned",
+      "trade discount allowed", "trade discount received",
+      "cash discount allowed", "cash discount received",
+      "discount on sales", "discount on purchases", "sales discount", "purchase discount",
+      "rebate allowed", "rebate received", "rebate given", "rebate earned",
+      "discount & rebate", "cash rebate",
+      "settlement discount", "prompt payment discount", "early payment discount", "early settlement discount",
+      "volume discount", "quantity discount", "special discount",
+      "discount to customers", "discount from suppliers", "discount from vendors",
+      "scheme discount", "promotional discount", "loyalty discount", "seasonal discount",
+      "discount allowed account", "discount received account",
+      "disc allowed", "disc received"
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Round off Ledger",
+    "intent": "Ledgers used to absorb fractional differences (paise-level) that arise due to GST rounding, invoice rounding, or accounting adjustments. These are purely mathematical balancing entries with no underlying transaction or payee. No TDS applies as there is no payment being made to any party.",
+    "keywords": [
+      "round off", "rounding off", "rounding difference", "rounding adjustment",
+      "round off charges", "round-off account",
+      "sales round off", "purchase round off", "rounding off account",
+      "fractional adjustment", "paise round off", "paise adjustment", "decimal adjustment",
+      "rounding error", "invoice rounding", "gst rounding", "tax rounding",
+      "round off gain", "round off loss", "rounding gain", "rounding loss"
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Bad Debts & its provision",
+    "intent": "Ledgers that record irrecoverable receivables being written off or a provision being created for doubtful debtors. This is an internal accounting recognition of loss — no actual payment flows out to any vendor or party. No TDS applies as there is no payment being made to any person.",
+    "keywords": [
+      "bad debts", "bad debt written off", "bad debts written off",
+      "bad debts account", "bad debt expense", "bad debt loss",
+      "doubtful debts", "doubtful debt provision",
+      "provision for bad debts", "provision for doubtful debts", "provision for bad and doubtful debts",
+      "irrecoverable debts", "irrecoverable amount written off",
+      "sundry debtors written off", "debtors written off",
+      "write off - debtors", "write off - receivables"
+    ]
+  },
+  {
+    "id": 4,
+    "name": "Profit Loss on sale of asset",
+    "intent": "Ledgers that capture the gain or loss arising when a fixed asset is sold — the difference between sale proceeds and book value. This is a notional accounting entry, not a payment to a vendor or contractor. No TDS applies as no amount is being paid to any deductee.",
+    "keywords": [
+      "profit on sale of assets", "loss on sale of assets",
+      "profit on sale of fixed assets", "loss on sale of fixed assets",
+      "gain on sale of assets", "gain on disposal of assets", "loss on disposal of assets",
+      "profit on disposal of fixed assets", "loss on disposal of fixed assets",
+      "profit on asset sale", "loss on asset sale",
+      "profit on sale of plant and machinery", "loss on sale of plant and machinery",
+      "profit on sale of vehicle", "loss on sale of vehicle",
+      "profit on sale of furniture", "loss on sale of furniture",
+      "profit on sale of equipment", "loss on sale of equipment",
+      "asset disposal account", "fixed asset disposal",
+      "profit on sale of investments", "loss on sale of investments",
+      "capital gain on sale of assets", "capital loss on sale of assets"
+    ]
+  },
+  {
+    "id": 5,
+    "name": "Prior period expense",
+    "intent": "Ledgers used to record expenses that belong to an earlier accounting period but are being accounted for now. The TDS liability, if any, would have been applicable at the time the original expense was incurred and paid.",
+    "keywords": [
+      "prior period expenses", "prior period income", "prior period adjustments", "prior period items",
+      "previous year expenses", "previous period expenses", "previous year adjustment",
+      "earlier year expenses", "prior year expenses", "prior period error",
+      "retrospective adjustment"
+    ]
+  },
+  {
+    "id": 6,
+    "name": "Write off Ledgers",
+    "intent": "Ledgers used to write off assets, stock, advances, or balances that are no longer recoverable or relevant. Like bad debts, this is an internal adjustment entry — no payment is going out to any external party. No TDS applies as there is no payment being made.",
+    "keywords": [
+      "write off", "written off", "write off account",
+      "stock written off", "inventory written off", "goods written off",
+      "assets written off", "fixed assets written off",
+      "advance written off", "loan written off", "deposits written off", "balance written off",
+      "prepaid written off",
+      "capital work in progress written off", "cwip written off",
+      "goodwill written off", "intangible assets written off", "investment written off",
+      "obsolete stock written off", "damaged goods written off", "expired stock written off",
+      "irrecoverable advance written off"
+    ]
+  },
+  {
+    "id": 7,
+    "name": "Bank Charges",
+    "intent": "Ledgers that record fees levied directly by banks — such as service charges, cheque processing fees, NEFT/RTGS charges, or account maintenance fees. Banks are not deductees under TDS for routine service charges they themselves levy.",
+    "keywords": [
+      "bank charges", "bank service charges", "bank commission", "bank fees", "bank processing fees",
+      "cheque bounce charges", "cheque return charges",
+      "ecs bounce charges", "nach bounce charges",
+      "dd charges", "demand draft charges",
+      "swift charges", "wire transfer charges",
+      "rtgs charges", "neft charges", "imps charges", "atm charges",
+      "annual maintenance charges - bank", "account maintenance charges",
+      "overdraft charges"
+    ]
+  },
+  {
+    "id": 8,
+    "name": "Late Fees & Penalties",
+    "intent": "Ledgers recording statutory penalties, late filing fees, interest on delayed tax payments, or penal charges levied by government authorities (GST, Income Tax, ROC, etc.). Payments to government and statutory bodies are outside the TDS framework. Additionally, penalties are not deductible business expenses and carry no TDS obligation.",
+    "keywords": [
+      "late fees", "late payment charges", "late filing fees",
+      "penalty", "penalties", "penal charges", "penal interest",
+      "interest on late payment", "interest on delayed payment",
+      "gst late fees", "gst penalty",
+      "income tax penalty",
+      "tds interest", "tds late fees", "tds penalty",
+      "advance tax interest",
+      "interest under 234a", "interest under 234b", "interest under 234c",
+      "roc late fees", "mca late fees", "mca penalty",
+      "professional tax penalty",
+      "esic penalty", "ESI Penalty", "pf penalty", "epf penalty",
+      "customs penalty", "excise penalty", "stamp duty penalty",
+      "fine and penalty", "court fines",
+      "interest on tds default", "interest on gst default", "interest on statutory dues"
+    ]
+  },
+  {
+    "id": 9,
+    "name": "GST Ledgers in expenses",
+    "intent": "Ledgers representing GST components — CGST, SGST, IGST, UTGST — that appear on the expense side due to ITC reversal, blocked credit, or GST paid under reverse charge. These are tax liability entries payable to the government, not payments to vendors for services. No TDS applies on tax components paid to the government. If a ledger has name 'purchase-GST' then this is NOT a GST blocklist ledger — it is a purchase ledger that happens to have GST in the name. Look at the real intent of the expense; only ledgers solely representing a GST tax component are excluded.",
+    "keywords": [
+      "cgst", "sgst", "igst", "utgst",
+      "cgst payable", "sgst payable", "igst payable", "utgst payable",
+      "cgst expense", "sgst expense", "igst expense",
+      "input cgst", "input sgst", "input igst",
+      "itc reversal", "input tax credit reversal", "itc reversed",
+      "blocked itc", "ineligible itc",
+      "gst reversal", "gst expense",
+      "gst on reverse charge", "reverse charge gst",
+      "rcm payable", "rcm expense", "reverse charge mechanism",
+      "gst liability", "gst payable", "output gst",
+      "cess", "gst cess",
+      "gst written off", "gst loss", "gst adjustment"
+    ]
+  },
+  {
+    "id": 10,
+    "name": "Income Tax",
+    "intent": "Ledgers recording advance tax, self-assessment tax, or income tax provisions. These are direct tax payments made by the company to the government on its own income. No TDS is deductible on tax payments made to the government. Include only ledgers that solely relate to Income tax. Important: a ledger called 'Tax Audit Fees' or 'Tax Consultancy Fees' is NOT this category — those are professional fees paid to a CA/consultant and TDS u/s 194J applies; such ledgers must NOT be blocked.",
+    "keywords": [
+      "income tax", "income tax expense", "income tax provision", "provision for income tax",
+      "advance tax", "self assessment tax",
+      "corporate tax", "company tax", "tax on profit",
+      "mat", "minimum alternate tax", "mat credit",
+      "deferred tax", "deferred tax asset", "deferred tax liability", "deferred tax expense",
+      "wealth tax", "dividend distribution tax",
+      "surcharge on income tax",
+      "education cess", "health and education cess",
+      "income tax refund", "income tax interest", "interest on income tax refund",
+      "tds receivable", "tcs receivable",
+      "tax paid", "direct tax"
+    ]
+  },
+  {
+    "id": 11,
+    "name": "ESI & PF Ledger",
+    "intent": "Ledgers recording employer contributions to Employee State Insurance and Provident Fund. These are statutory payroll-linked contributions paid to government-managed funds (ESIC and EPFO). Contributions to recognised provident funds and ESI are specifically outside the TDS framework and are governed by separate statutes entirely.",
+    "keywords": [
+      "esic", "esi", "employee state insurance",
+      "esic contribution", "esic employer contribution", "esic employee contribution",
+      "esic payable", "esi payable",
+      "provident fund", "pf", "epf", "employees provident fund",
+      "employer pf contribution", "employee pf contribution", "epf contribution",
+      "pf payable", "epf payable", "pf employer share", "pf employee share",
+      "vpf", "voluntary provident fund",
+      "gratuity", "gratuity provision", "provision for gratuity",
+      "gratuity payable", "gratuity fund", "gratuity expense", "gratuity contribution",
+      "superannuation", "superannuation fund", "superannuation contribution",
+      "national pension scheme", "nps contribution", "employer nps contribution",
+      "labour welfare fund", "lwf", "lwf contribution"
+    ]
+  }
+]

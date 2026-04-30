@@ -10,6 +10,17 @@ Filenames are sanitized copies of ledger names (unsafe characters replaced).
 
 Inherited filtering from final_list.py includes exclusion of discount/round-off
 ledgers in the expense/fixed-asset side of the voucher pattern.
+
+TDS mode (optional)
+-------------------
+Pass ``--filtered-expense FILE`` to load a pre-filtered expense set from a JSON
+array or one-name-per-line text file (typically the output of
+``apply_expense_blocklist.py``). When given, that file is used as the
+expense_or_fixed set instead of the XML classification — this is the same
+``--filtered-expense`` flag that ``final_list.py`` accepts. The two scripts
+must use the same flag for the blocklist filter to flow consistently through
+the pipeline; otherwise the per-ledger XML slices in ``vouchers_by_final_list/``
+would still include vouchers from blocklisted ledgers.
 """
 
 from __future__ import annotations
@@ -19,6 +30,13 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
+
+# Ensure sibling packages are importable regardless of working directory.
+_ROOT = Path(__file__).resolve().parent.parent
+for _d in ("classify", "vouchers", "tds"):
+    _p = str(_ROOT / _d)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from exclude_groups_ledgers import (
     DEFAULT_ROOT_GROUPS,
@@ -35,9 +53,15 @@ def load_final_ledger_names(
     ledgers: Path,
     daybook: Path,
     groups_xml: Path,
+    filtered_expense: Path | None = None,
+    auto_detect: bool = True,
 ) -> list[str]:
     ledgers_path = str(ledgers)
-    expense_or_fixed, liability_or_current = load_expense_and_liability_sets(ledgers)
+    # Both `--filtered-expense` and `--no-filter` are forwarded to the
+    # centralized loader in vouchers_liability_no_expense_yes.py.
+    expense_or_fixed, liability_or_current = load_expense_and_liability_sets(
+        ledgers, expense_override=filtered_expense, auto_detect=auto_detect
+    )
     voucher_names = collect_matching_liability_names(
         daybook, expense_or_fixed, liability_or_current
     )
@@ -140,6 +164,21 @@ def main() -> None:
         default=base / "vouchers_by_final_list",
         help="Folder for one XML per final-list ledger (created if missing)",
     )
+    p.add_argument(
+        "--filtered-expense",
+        type=Path,
+        default=None,
+        help="Optional: pre-filtered expense ledger names "
+             "(JSON array or one-name-per-line text). When given, this set replaces "
+             "the XML-derived expense_or_fixed set (typically the output of "
+             "apply_expense_blocklist.py for TDS analysis). Beats auto-detect.",
+    )
+    p.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="Force raw-XML expense classification even if expense_filtered.json "
+             "exists next to the ledgers XML. Use for non-TDS runs.",
+    )
     args = p.parse_args()
 
     if not args.ledgers.is_file():
@@ -151,8 +190,17 @@ def main() -> None:
     if not args.groups_xml.is_file():
         print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
         sys.exit(1)
+    if args.filtered_expense is not None and not args.filtered_expense.is_file():
+        print(f"Filtered expense file not found: {args.filtered_expense}", file=sys.stderr)
+        sys.exit(1)
 
-    names = load_final_ledger_names(args.ledgers, args.daybook, args.groups_xml)
+    names = load_final_ledger_names(
+        args.ledgers,
+        args.daybook,
+        args.groups_xml,
+        args.filtered_expense,
+        auto_detect=not args.no_filter,
+    )
     if not names:
         print("Final list is empty; nothing to write.", file=sys.stderr)
         sys.exit(0)

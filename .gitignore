@@ -1,12 +1,19 @@
-# Data folders
+# All generated outputs
 data/
-vouchers_by_final_list/
-vouchers_by_final_list_json/
 
-# Data files
+# Data files at any level
 *.xml
 *.json
+# ...but the blocklist categories config IS source-controlled (TDS mode)
+!config/expense_blocklist_categories.json
+
+# Local secrets — never commit
+.env
+config/.env
+.env.*
+!.env.example
+!config/.env.example
 
 .DS_Store
 __pycache__/
-*.pyc   
+*.pyc
