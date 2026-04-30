@@ -30,11 +30,6 @@ Pipeline
 
 Usage
 -----
-  # First run — review the report before trusting the output
-  python tds_expense_wrapper.py --dry-run
-
-  # Inspect expense_blocklist_report.json, especially names containing
-  # 'tax' or 'gst', then if happy:
   python tds_expense_wrapper.py
 
   # Subsequent runs are byte-identical and free thanks to the cache.
@@ -149,12 +144,6 @@ def main() -> None:
         "--concurrency", type=int, default=1,
         help="Parallel LLM calls in flight at once (default: 1).",
     )
-    p.add_argument(
-        "--dry-run", action="store_true",
-        help="Run the LLM filter and write the report + filtered expense list, "
-             "but DO NOT scan the daybook or write --output. "
-             "Use this on first run to review the report before committing.",
-    )
     args = p.parse_args()
 
     # Validate inputs.
@@ -164,14 +153,10 @@ def main() -> None:
     if not args.config.is_file():
         print(f"Config file not found: {args.config}", file=sys.stderr)
         sys.exit(1)
-    if not args.dry_run and not args.daybook.is_file():
+    if not args.daybook.is_file():
         print(f"Daybook file not found: {args.daybook}", file=sys.stderr)
         sys.exit(1)
-    if (
-        not args.dry_run
-        and not args.no_group_exclusion
-        and not args.groups_xml.is_file()
-    ):
+    if not args.no_group_exclusion and not args.groups_xml.is_file():
         print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
         sys.exit(1)
 
@@ -217,14 +202,6 @@ def main() -> None:
         f"  Filtered set   : {args.filtered_expense}",
         file=sys.stderr,
     )
-
-    if args.dry_run:
-        print(
-            "\n--dry-run: stopping before voucher scan. Review the report above; if it "
-            "looks correct, re-run without --dry-run to produce the final voucher output.",
-            file=sys.stderr,
-        )
-        return
 
     # ----- Stage 3: voucher scan with the filtered expense set -----
     print("\nStage 3: scanning daybook vouchers with filtered expense set...",

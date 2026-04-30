@@ -213,7 +213,6 @@ and streams progress to the terminal. All generated files land in `data/`.
 |---------|-------------|
 | `python run.py` | Standard offline pipeline — compute ledger list → split daybook → convert to JSON |
 | `python run.py --tds` | TDS mode — LLM blocklist filter before voucher scan (needs `ANTHROPIC_API_KEY`) |
-| `python run.py --tds --dry-run` | TDS dry-run — write audit report only, skip voucher scan |
 | `python run.py --export` | Export from live Tally first, then run offline pipeline |
 | `python run.py --export --start 01-04-2024 --end 31-03-2025` | Export with explicit date range, then pipeline |
 | `python run.py --export --tds` | Export from Tally + TDS mode in one shot |
@@ -226,10 +225,6 @@ After a standard run you have (all inside `data/`):
 After `--tds` you additionally get:
 - `data/expense_filtered.json` — expense ledgers with blocklisted names removed
 - `data/expense_blocklist_report.json` — per-name LLM audit report
-
-> **Tip — TDS first time:** run `python run.py --tds --dry-run` first, review
-> `data/expense_blocklist_report.json`, then run `python run.py --tds` for the
-> full pipeline. The LLM cache makes every subsequent run byte-identical and free.
 
 See [`run.py`](#0-runpy--pipeline-orchestrator) in Script Reference and
 [TDS Analysis Mode](#tds-analysis-mode) for full details.
@@ -253,7 +248,6 @@ at import time.
 | `--start DD-MM-YYYY` | `01-04-2024` | Daybook start date (used with `--export`) |
 | `--end DD-MM-YYYY` | `31-03-2025` | Daybook end date (used with `--export`) |
 | `--tds` | off | Apply LLM expense blocklist before voucher scan (TDS mode) |
-| `--dry-run` | off | TDS only — write audit report + filtered expense set, skip voucher scan |
 
 **Run:**
 
@@ -263,7 +257,6 @@ python run.py
 
 # TDS mode
 python run.py --tds
-python run.py --tds --dry-run
 
 # Export from Tally first, then offline pipeline
 python run.py --export
@@ -809,18 +802,10 @@ liability/current-asset ledger names suitable for `split_daybook_by_final_list.p
 | `--max-tokens N` | 32000 | Output cap per batch |
 | `--json` | off | Write `--output` as a sorted JSON array |
 | `--no-group-exclusion` | off | Skip Stage 4 (duties/cash/bank/branch exclusion) |
-| `--dry-run` | off | Run only Stages 1 & 2; write the report and filtered set, skip voucher scan |
 
 **Run:**
 
 ```bash
-# Recommended first-time flow
-python tds/tds_expense_wrapper.py --dry-run \
-  --ledgers data/tally_ledgers_final.xml \
-  --daybook data/daybook_01042024_to_31032025.xml \
-  --groups-xml data/tally_groups_final.xml \
-  --config config/expense_blocklist_categories.json
-# (review data/expense_blocklist_report.json)
 python tds/tds_expense_wrapper.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
@@ -895,11 +880,6 @@ end-to-end: classify ledgers, apply LLM blocklist, scan vouchers, apply group
 exclusion, write final list and JSON slices.
 
 ```bash
-# First time: dry-run to produce the audit report only
-python run.py --tds --dry-run
-# (review data/expense_blocklist_report.json)
-
-# When satisfied: full pipeline — cache makes re-runs byte-identical and free
 python run.py --tds
 ```
 
@@ -947,8 +927,8 @@ python vouchers/final_list.py \
 
 - **First run is non-deterministic-feeling.** The LLM cache makes subsequent
   runs byte-identical, but the very first pass over a fresh ledger set will
-  produce *one* set of decisions. Always start with `--dry-run` and review the
-  audit report before trusting the filtered output.
+  produce *one* set of decisions. Review `data/expense_blocklist_report.json`
+  after the first run to verify the decisions before trusting the filtered output.
 - **Cache must be deleted to force a re-classification** of a ledger whose
   decision you disagree with. Edit `expense_blocklist_cache.json` to remove
   the entry, then re-run.

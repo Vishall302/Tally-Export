@@ -7,13 +7,12 @@ Standard offline pipeline (raw XMLs already in data/):
 
 TDS mode — LLM expense blocklist before voucher scan (needs ANTHROPIC_API_KEY):
   python run.py --tds
-  python run.py --tds --dry-run        # write audit report only, skip voucher scan
 
 Export from live Tally first, then run offline pipeline:
   python run.py --export
   python run.py --export --start 01-04-2024 --end 31-03-2025
 
-All flags can be combined:
+Flags can be combined:
   python run.py --export --tds --start 01-04-2024 --end 31-03-2025
 """
 from __future__ import annotations
@@ -58,10 +57,6 @@ def main() -> None:
         "--tds", action="store_true",
         help="Apply LLM expense blocklist before voucher scan (TDS mode)",
     )
-    p.add_argument(
-        "--dry-run", action="store_true",
-        help="TDS only: write audit report + filtered expense set, skip voucher scan",
-    )
     args = p.parse_args()
 
     daybook_file = f"daybook_{args.start.replace('-', '')}_to_{args.end.replace('-', '')}.xml"
@@ -99,8 +94,6 @@ def main() -> None:
             "--report",           str(BLOCKLIST_RPT),
             "--output",           str(FINAL_LIST),
         ]
-        if args.dry_run:
-            tds_cmd.append("--dry-run")
         step("TDS     [1/3]  blocklist filter + voucher scan", tds_cmd)
     else:
         with open(FINAL_LIST, "w") as out_f:
@@ -113,20 +106,19 @@ def main() -> None:
         count = sum(1 for line in open(FINAL_LIST) if line.strip())
         print(f"  → {FINAL_LIST.relative_to(ROOT)}: {count} ledgers", flush=True)
 
-    # ── Phase 3: Split + JSON (skipped on TDS dry-run) ───────────────────────
-    if not (args.tds and args.dry_run):
-        step("Offline [2/3]  split daybook into per-ledger XML slices",
-             [PY, "vouchers/split_daybook_by_final_list.py",
-              "--ledgers",   str(LEDGERS),
-              "--daybook",   str(DAYBOOK),
-              "--groups-xml", str(GROUPS),
-              "--out-dir",   str(VOUCHERS_XML)])
+    # ── Phase 3: Split + JSON ────────────────────────────────────────────────
+    step("Offline [2/3]  split daybook into per-ledger XML slices",
+         [PY, "vouchers/split_daybook_by_final_list.py",
+          "--ledgers",    str(LEDGERS),
+          "--daybook",    str(DAYBOOK),
+          "--groups-xml", str(GROUPS),
+          "--out-dir",    str(VOUCHERS_XML)])
 
-        step("Offline [3/3]  convert XML slices to JSON",
-             [PY, "vouchers/vouchers_to_json_with_ledger.py",
-              "--ledgers",     str(LEDGERS),
-              "--vouchers-dir", str(VOUCHERS_XML),
-              "--output-dir",  str(VOUCHERS_JSON)])
+    step("Offline [3/3]  convert XML slices to JSON",
+         [PY, "vouchers/vouchers_to_json_with_ledger.py",
+          "--ledgers",      str(LEDGERS),
+          "--vouchers-dir", str(VOUCHERS_XML),
+          "--output-dir",   str(VOUCHERS_JSON)])
 
     print(f"\n{'=' * 60}", flush=True)
     print("  Pipeline complete.", flush=True)
