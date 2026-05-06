@@ -16,10 +16,10 @@ By default, only names that also appear in voucher ledger entries are included.
 Redirect to a file if needed, e.g.  ... > test3.txt
 
 Usage:
-  python list_expense_or_fixed_asset_ledgers.py
-  python list_expense_or_fixed_asset_ledgers.py --xml /path/to/tally_ledgers_final.xml
-  python list_expense_or_fixed_asset_ledgers.py --daybook /path/to/daybook.xml
-  python list_expense_or_fixed_asset_ledgers.py --json
+  python list_expense_ledgers.py
+  python list_expense_ledgers.py --xml /path/to/tally_ledgers_final.xml
+  python list_expense_ledgers.py --daybook /path/to/daybook.xml
+  python list_expense_ledgers.py --json
 """
 
 from __future__ import annotations

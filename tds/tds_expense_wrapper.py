@@ -2,17 +2,17 @@
 """
 End-to-end TDS-analysis pipeline wrapper.
 
-Drives the same flow as ``final_list.py`` but inserts the pure-LLM blocklist
+Drives the same flow as ``analyze/final_list.py`` but inserts the pure-LLM blocklist
 filter from ``apply_expense_blocklist.py`` between ledger-classification and
-voucher-scanning, then applies the same ``exclude_groups_ledgers`` group-tree
-exclusion ``final_list.py`` uses. **No existing script is modified.** The
+voucher-scanning, then applies the same ``core.groups`` group-tree exclusion
+``analyze/final_list.py`` uses. **No existing script is modified.** The
 wrapper imports public functions from:
 
-  - ``vouchers_liability_no_expense_yes`` — ``load_expense_and_liability_sets``,
-    ``collect_matching_liability_names``
-  - ``exclude_groups_ledgers`` — ``parent_names_from_roots``,
+  - ``core.ledger_sets`` — ``load_expense_and_liability_sets``
+  - ``analyze.detect_cross_vouchers`` — ``collect_matching_liability_names``
+  - ``core.groups`` — ``parent_names_from_roots``,
     ``ledgers_with_parent_in``, ``DEFAULT_ROOT_GROUPS``
-  - ``apply_expense_blocklist`` — ``filter_names``, ``load_config``
+  - ``tds.apply_expense_blocklist`` — ``filter_names``, ``load_config``
 
 (This is the same import pattern ``final_list.py`` already uses.)
 
@@ -45,28 +45,23 @@ import json
 import sys
 from pathlib import Path
 
-# Ensure sibling packages are importable regardless of working directory.
 _ROOT = Path(__file__).resolve().parent.parent
-for _d in ("classify", "vouchers", "tds"):
-    _p = str(_ROOT / _d)
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-from apply_expense_blocklist import (  # noqa: E402
+from tds.apply_expense_blocklist import (  # noqa: E402
     filter_names,
     load_config,
     write_names,
     write_report,
 )
-from exclude_groups_ledgers import (  # noqa: E402
+from core.groups import (  # noqa: E402
     DEFAULT_ROOT_GROUPS,
     ledgers_with_parent_in,
     parent_names_from_roots,
 )
-from vouchers_liability_no_expense_yes import (  # noqa: E402
-    collect_matching_liability_names,
-    load_expense_and_liability_sets,
-)
+from core.ledger_sets import load_expense_and_liability_sets  # noqa: E402
+from analyze.detect_cross_vouchers import collect_matching_liability_names  # noqa: E402
 
 
 def main() -> None:
@@ -110,8 +105,8 @@ def main() -> None:
         help="Persistent LLM decision cache.",
     )
     p.add_argument(
-        "--model", default="claude-opus-4-7",
-        help="Anthropic model ID (default: claude-opus-4-7).",
+        "--model", default="claude-haiku-4-5",
+        help="Anthropic model ID (default: claude-haiku-4-5).",
     )
     p.add_argument(
         "--batch-size", type=int, default=25,

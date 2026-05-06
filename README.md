@@ -21,13 +21,13 @@
   - [1. tally_groups.py](#1-tally_groupspy--group-master--classification)
   - [2. tally_ledger_master.py](#2-tally_ledger_masterpy--ledger-master--enrichment)
   - [3. tally_daybook.py](#3-tally_daybookpy--voucher-register)
-  - [4. list_liability_or_current_assets_ledgers.py](#4-list_liability_or_current_assets_ledgerspy)
-  - [5. list_expense_or_fixed_asset_ledgers.py](#5-list_expense_or_fixed_asset_ledgerspy)
-  - [6. exclude_groups_ledgers.py](#6-exclude_groups_ledgerspy--exclude-groups-closure)
-  - [7. vouchers_liability_no_expense_yes.py](#7-vouchers_liability_no_expense_yespy--cross-voucher-pattern)
+  - [4. list_liability_ledgers.py](#4-list_liability_ledgerspy)
+  - [5. list_expense_ledgers.py](#5-list_expense_ledgerspy)
+  - [6. groups.py](#6-groupspy--exclude-groups-closure)
+  - [7. detect_cross_vouchers.py](#7-detect_cross_voucherspy--cross-voucher-pattern)
   - [8. final_list.py](#8-final_listpy--voucher-pattern-ledgers-minus-duties--taxes)
-  - [9. split_daybook_by_final_list.py](#9-split_daybook_by_final_listpy--per-ledger-daybook-slices)
-  - [10. vouchers_to_json_with_ledger.py](#10-vouchers_to_json_with_ledgerpy--json-with-ledger-master)
+  - [9. split_by_ledger.py](#9-split_by_ledgerpy--per-ledger-daybook-slices)
+  - [10. to_json.py](#10-to_jsonpy--json-with-ledger-master)
   - [11. apply_expense_blocklist.py](#11-apply_expense_blocklistpy--llm-blocklist-filter-tds-mode)
   - [12. tds_expense_wrapper.py](#12-tds_expense_wrapperpy--end-to-end-tds-orchestrator)
   - [13. expense_blocklist_categories.json](#13-expense_blocklist_categoriesjson--blocklist-config)
@@ -78,7 +78,7 @@ flowchart TB
         API["XML HTTP API"]
     end
 
-    subgraph export["📤 Export scripts — live Tally required"]
+    subgraph export["📤 export/ — live Tally required"]
         TG["tally_groups.py"]
         TL["tally_ledger_master.py"]
         TD["tally_daybook.py"]
@@ -93,19 +93,19 @@ flowchart TB
     end
 
     subgraph offline["🔍 Offline analysis — XML only, no Tally needed"]
-        LL["list_liability_or_current_assets_ledgers.py"]
-        LE["list_expense_or_fixed_asset_ledgers.py"]
-        DT["exclude_groups_ledgers.py"]
-        VX["vouchers_liability_no_expense_yes.py"]
-        FL["final_list.py"]
-        SP["split_daybook_by_final_list.py"]
-        VJ["vouchers_to_json_with_ledger.py"]
+        LL["analyze/list_liability_ledgers.py"]
+        LE["analyze/list_expense_ledgers.py"]
+        DT["core/groups.py"]
+        VX["analyze/detect_cross_vouchers.py"]
+        FL["analyze/final_list.py"]
+        SP["output/split_by_ledger.py"]
+        VJ["output/to_json.py"]
     end
 
     subgraph tds["🧮 TDS Analysis Mode (optional, requires Claude API key)"]
         BC["expense_blocklist_categories.json\n(11 PDF categories)"]
-        AB["apply_expense_blocklist.py\n(LLM filter + audit report)"]
-        TW["tds_expense_wrapper.py\n(end-to-end TDS pipeline)"]
+        AB["tds/apply_expense_blocklist.py\n(LLM filter + audit report)"]
+        TW["tds/tds_expense_wrapper.py\n(end-to-end TDS pipeline)"]
         EF["expense_filtered.json"]
         AR["expense_blocklist_report.json"]
     end
@@ -237,8 +237,8 @@ See [`run.py`](#0-runpy--pipeline-orchestrator) in Script Reference and
 
 **Role:** Single entry point that runs the entire pipeline in the correct order.
 Resolves all file paths automatically (everything reads from and writes to `data/`).
-No `PYTHONPATH` setup needed — the individual scripts self-register their directories
-at import time.
+No `PYTHONPATH` setup needed — each script inserts the project root into `sys.path`
+at startup so package imports resolve correctly.
 
 **CLI flags:**
 
@@ -288,7 +288,7 @@ python export/tally_groups.py
 
 > ⚠️ **Warning:** This script executes at import time (no `if __name__ == "__main__"` guard). Do **not** `import tally_groups` as a library unless you intend to trigger a live HTTP request.
 
-**Downstream consumers:** `exclude_groups_ledgers.py`, `final_list.py`, `split_daybook_by_final_list.py`.
+**Downstream consumers:** `core/groups.py`, `analyze/final_list.py`, `output/split_by_ledger.py`.
 
 ---
 
@@ -357,58 +357,60 @@ export_daybook_to_path("01-04-2024", "31-03-2025", "my_daybook.xml")
 
 > **Timeouts:** 900 s read timeout per monthly chunk. Very large companies may still need smaller ranges or TDL-level optimisation.
 
-**Downstream consumers:** `vouchers_liability_no_expense_yes.py`, `final_list.py`, `split_daybook_by_final_list.py`.
+**Downstream consumers:** `analyze/detect_cross_vouchers.py`, `analyze/final_list.py`, `output/split_by_ledger.py`.
 
 ---
 
-### 4. `list_liability_or_current_assets_ledgers.py`
+### 4. `list_liability_ledgers.py`
+
+**Location:** `analyze/list_liability_ledgers.py`
 
 **Role:** Reads the enriched ledger XML and prints one ledger name per line for every ledger where:
 
 - `NATURE == "Liability"`, **or**
 - `ROOTPRIMARY == "Current Assets"`
 
-**Default input:** `tally_ledgers_final.xml` in the current directory.
+Includes only names that also appear in at least one daybook voucher entry.
 
 **Run:**
 
 ```bash
-python classify/list_liability_or_current_assets_ledgers.py
-python classify/list_liability_or_current_assets_ledgers.py data/tally_ledgers_final.xml
+python analyze/list_liability_ledgers.py data/tally_ledgers_final.xml data/daybook_01042024_to_31032025.xml
 ```
 
 Uses `iterparse` — safe for large ledger files.
 
 ---
 
-### 5. `list_expense_or_fixed_asset_ledgers.py`
+### 5. `list_expense_ledgers.py`
+
+**Location:** `analyze/list_expense_ledgers.py`
 
 **Role:** Same enrichment contract as script 4. Includes a ledger if:
 
 - `NATURE == "Expense"`, **or**
 - `ROOTPRIMARY == "Fixed Assets"`
 
-Then excludes ledger names matching discount/round-off patterns:
-- any name containing `discount` (for example `Discount`, `Discount Allowed`, `Discount Aalowed`)
-- `round off` and `roundoff` variants (case-insensitive, spacing/punctuation tolerant)
-
 **CLI flags:**
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--xml PATH` | `tally_ledgers_final.xml` | Ledger master path |
+| `--xml PATH` | `tally_ledgers_final.xml` (next to script) | Ledger master path |
+| `--daybook PATH` | `daybook_01042024_to_31032025.xml` (next to script) | Daybook path |
 | `--json` | off | Output as JSON array instead of one-per-line |
 
 **Run:**
 
 ```bash
-python classify/list_expense_or_fixed_asset_ledgers.py
-python classify/list_expense_or_fixed_asset_ledgers.py --xml data/tally_ledgers_final.xml --json
+python analyze/list_expense_ledgers.py --xml data/tally_ledgers_final.xml --daybook data/daybook_01042024_to_31032025.xml
+python analyze/list_expense_ledgers.py --xml data/tally_ledgers_final.xml --daybook data/daybook_01042024_to_31032025.xml --json
 ```
 
 ---
 
-### 6. `exclude_groups_ledgers.py` — Exclude-groups closure
+### 6. `groups.py` — Exclude-groups closure
+
+**Location:** `core/groups.py`
 
 **Role:**
 
@@ -428,23 +430,24 @@ python classify/list_expense_or_fixed_asset_ledgers.py --xml data/tally_ledgers_
 **Run:**
 
 ```bash
-python classify/exclude_groups_ledgers.py
-python classify/exclude_groups_ledgers.py --groups-only -v
-python classify/exclude_groups_ledgers.py --groups-xml data/tally_groups_final.xml --ledgers-xml data/tally_ledgers_final.xml
-python classify/exclude_groups_ledgers.py --roots "Duties & Taxes" "Cash-in-Hand" "Bank Accounts" "Branch / Divisions"
+python core/groups.py
+python core/groups.py --groups-only -v
+python core/groups.py --groups-xml data/tally_groups_final.xml --ledgers-xml data/tally_ledgers_final.xml
+python core/groups.py --roots "Duties & Taxes" "Cash-in-Hand" "Bank Accounts" "Branch / Divisions"
 ```
 
-**Downstream consumers:** `final_list.py` (uses its output as the exclusion set).
+**Downstream consumers:** `analyze/final_list.py`, `output/split_by_ledger.py`, `tds/tds_expense_wrapper.py` (all import `parent_names_from_roots` and `ledgers_with_parent_in` from this module).
 
 ---
 
-### 7. `vouchers_liability_no_expense_yes.py` — Cross-voucher pattern
+### 7. `detect_cross_vouchers.py` — Cross-voucher pattern
+
+**Location:** `analyze/detect_cross_vouchers.py`
 
 **Role:** Detects vouchers that match **both** of these conditions simultaneously:
 
 1. At least one entry credits a **liability / current-asset** ledger (`ISDEEMEDPOSITIVE == "No"`)
-2. At least one entry debits an **expense / fixed-asset** ledger (`ISDEEMEDPOSITIVE == "Yes"`),
-   after excluding discount/round-off ledger names (`discount*`, `round off`, `roundoff`)
+2. At least one entry debits an **expense / fixed-asset** ledger (`ISDEEMEDPOSITIVE == "Yes"`)
 
 Prints the **distinct liability/current-asset ledger names** from all matching vouchers, sorted.
 
@@ -452,40 +455,40 @@ Prints the **distinct liability/current-asset ledger names** from all matching v
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--ledgers PATH` | `tally_ledgers_final.xml` | Enriched ledger master |
-| `--daybook PATH` | `daybook_01042024_to_31032025.xml` | Daybook XML |
+| `--ledgers PATH` | `tally_ledgers_final.xml` (next to script) | Enriched ledger master |
+| `--daybook PATH` | `daybook_01042024_to_31032025.xml` (next to script) | Daybook XML |
 | `--json` | off | Output as JSON array |
-| `-o PATH` | `test.txt` | Write output to file instead of stdout |
+| `-o PATH` | `test.txt` (next to script) | Write output to file instead of stdout |
 | `--filtered-expense PATH` | (none) | **Explicit TDS override:** load the expense_or_fixed set from this file (JSON array or one-name-per-line text). Beats auto-detect. |
 | `--no-filter` | off | Force raw-XML classification even if `expense_filtered.json` exists next to the ledgers XML. Use for non-TDS runs. |
 
 **Run:**
 
 ```bash
-python vouchers/vouchers_liability_no_expense_yes.py \
+python analyze/detect_cross_vouchers.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml
-python vouchers/vouchers_liability_no_expense_yes.py \
+python analyze/detect_cross_vouchers.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml --json
 
 # TDS mode — explicit override
-python vouchers/vouchers_liability_no_expense_yes.py \
+python analyze/detect_cross_vouchers.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --filtered-expense data/expense_filtered.json
 
 # Force raw XML even if a sidecar exists
-python vouchers/vouchers_liability_no_expense_yes.py \
+python analyze/detect_cross_vouchers.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml --no-filter
 ```
 
 **Architecture note — single source of truth + auto-detect.** Every other
-script in the pipeline that needs an expense set (`final_list.py`,
-`split_daybook_by_final_list.py`, `tds_expense_wrapper.py`) imports
-`load_expense_and_liability_sets()` from this module. The override hook lives
-inside that function, so `--filtered-expense`, `--no-filter`, and the
+script in the pipeline that needs an expense set (`analyze/final_list.py`,
+`output/split_by_ledger.py`, `tds/tds_expense_wrapper.py`) imports
+`load_expense_and_liability_sets()` from `core/ledger_sets.py`. The override
+hook lives inside that function, so `--filtered-expense`, `--no-filter`, and the
 auto-detect behavior all work the same way everywhere — there's exactly one
 piece of code that knows how to pick the expense source.
 
@@ -499,7 +502,7 @@ piece of code that knows how to pick the expense source.
 | 4 | None of the above | Raw XML extraction |
 
 Every run logs the resolved source on stderr (e.g.
-`[vouchers_liability_no_expense_yes] Auto-detected filter sidecar: expense_filtered.json (next to ledgers XML).`)
+`[core.ledger_sets] Auto-detected filter sidecar: expense_filtered.json (next to ledgers XML).`)
 so the audit trail is in stdout/stderr regardless of how the script was invoked.
 
 **Staleness check.** If the auto-detected sidecar is older than the ledgers
@@ -508,13 +511,14 @@ a loud `WARNING` line is printed but the run continues using the existing
 sidecar. Re-run `apply_expense_blocklist.py` to refresh. Pass `--no-filter` to
 ignore the sidecar entirely.
 
-**Downstream consumers:** `final_list.py`, `split_daybook_by_final_list.py`,
-`tds_expense_wrapper.py` (all import `load_expense_and_liability_sets` and
+**Downstream consumers:** `analyze/final_list.py`, `tds/tds_expense_wrapper.py` (both import
 `collect_matching_liability_names` from this module).
 
 ---
 
 ### 8. `final_list.py` — Voucher-pattern ledgers minus excluded groups
+
+**Location:** `analyze/final_list.py`
 
 **Role:** Produces the **set difference**:
 
@@ -522,15 +526,16 @@ ignore the sidecar entirely.
 voucher_pattern_ledgers  −  excluded_group_ledgers
 ```
 
-Internally reimplements the logic of both `vouchers_liability_no_expense_yes.py` and `exclude_groups_ledgers.py` — no shell pipe required.
+Imports `collect_matching_liability_names` from `analyze/detect_cross_vouchers.py` and
+`parent_names_from_roots` / `ledgers_with_parent_in` from `core/groups.py` — no shell pipe required.
 
 **CLI flags:**
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--ledgers PATH` | `tally_ledgers_final.xml` | Ledger master |
-| `--daybook PATH` | `daybook_01042024_to_31032025.xml` | Daybook XML |
-| `--groups-xml PATH` | `tally_groups_final.xml` | Group hierarchy |
+| `--ledgers PATH` | `tally_ledgers_final.xml` (next to script) | Ledger master |
+| `--daybook PATH` | `daybook_01042024_to_31032025.xml` (next to script) | Daybook XML |
+| `--groups-xml PATH` | `tally_groups_final.xml` (next to script) | Group hierarchy |
 | `--filtered-expense PATH` | (none) | **Explicit TDS override:** load the expense_or_fixed set from this file. Beats auto-detect. |
 | `--no-filter` | off | Force raw-XML classification even if `expense_filtered.json` exists next to the ledgers XML. Use for non-TDS runs while a sidecar is present. |
 | `--json` | off | Output as JSON array |
@@ -538,17 +543,17 @@ Internally reimplements the logic of both `vouchers_liability_no_expense_yes.py`
 **Run:**
 
 ```bash
-python vouchers/final_list.py \
+python analyze/final_list.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml
-python vouchers/final_list.py \
+python analyze/final_list.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml --json
 
 # Save to file
-python vouchers/final_list.py \
+python analyze/final_list.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml > data/final.txt
@@ -557,19 +562,21 @@ python vouchers/final_list.py \
 python tds/apply_expense_blocklist.py --input expense_raw.json \
   --output data/expense_filtered.json --report data/expense_blocklist_report.json
 # (review data/expense_blocklist_report.json)
-python vouchers/final_list.py \
+python analyze/final_list.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml  # auto-detects expense_filtered.json next to the ledgers XML
 ```
 
-**Downstream consumers:** `split_daybook_by_final_list.py` (applies this list programmatically without calling `final_list.py`).
+**Downstream consumers:** `output/split_by_ledger.py` imports `load_final_ledger_names()` from this module directly.
 
 ---
 
-### 9. `split_daybook_by_final_list.py` — Per-ledger daybook slices
+### 9. `split_by_ledger.py` — Per-ledger daybook slices
 
-**Role:** Computes the same **final list** as `final_list.py` (programmatically), scans the daybook **once**, and writes **one `<TALLYDAYBOOK>` XML file per ledger name** containing every voucher that references that ledger (by `LEDGERNAME` or `PARTYLEDGERNAME`).
+**Location:** `output/split_by_ledger.py`
+
+**Role:** Calls `load_final_ledger_names()` from `analyze/final_list.py`, scans the daybook **once**, and writes **one `<TALLYDAYBOOK>` XML file per ledger name** containing every voucher that references that ledger (by `LEDGERNAME` or `PARTYLEDGERNAME`).
 
 **Output:** `vouchers_by_final_list/` folder — one `.xml` per ledger.  
 Each file root carries `FROMDATE`, `TODATE`, and `TOTALCOUNT` attributes.  
@@ -579,42 +586,44 @@ Filenames are **sanitised** (`<>:"/\|?*` → `_`) with `_2`, `_3` suffixes on co
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--ledgers PATH` | `tally_ledgers_final.xml` | Ledger master |
-| `--daybook PATH` | `daybook_01042024_to_31032025.xml` | Daybook XML |
-| `--groups-xml PATH` | `tally_groups_final.xml` | Group hierarchy |
-| `--out-dir PATH` | `vouchers_by_final_list` | Output folder |
+| `--ledgers PATH` | `tally_ledgers_final.xml` (next to script) | Ledger master |
+| `--daybook PATH` | `daybook_01042024_to_31032025.xml` (next to script) | Daybook XML |
+| `--groups-xml PATH` | `tally_groups_final.xml` (next to script) | Group hierarchy |
+| `--out-dir PATH` | `vouchers_by_final_list` (next to script) | Output folder |
 | `--filtered-expense PATH` | (none) | **Explicit TDS override:** load the expense_or_fixed set from this file. Beats auto-detect. |
 | `--no-filter` | off | Force raw-XML classification even if `expense_filtered.json` is auto-detected next to the ledgers XML. |
 
 **Run:**
 
 ```bash
-python vouchers/split_daybook_by_final_list.py \
+python output/split_by_ledger.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml \
   --out-dir data/vouchers_by_final_list
 
 # TDS mode — auto-detects expense_filtered.json next to the ledgers XML
-python vouchers/split_daybook_by_final_list.py \
+python output/split_by_ledger.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml \
   --out-dir data/vouchers_by_final_list
 
 # Force raw XML even if a sidecar is present
-python vouchers/split_daybook_by_final_list.py \
+python output/split_by_ledger.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml \
   --out-dir data/vouchers_by_final_list --no-filter
 ```
 
-**Downstream consumers:** `vouchers_to_json_with_ledger.py`.
+**Downstream consumers:** `output/to_json.py`.
 
 ---
 
-### 10. `vouchers_to_json_with_ledger.py` — JSON with ledger master
+### 10. `to_json.py` — JSON with ledger master
+
+**Location:** `output/to_json.py`
 
 **Role:** Converts each `vouchers_by_final_list/*.xml` to a structured JSON file. Parses `tally_ledgers_final.xml` **once** and resolves canonical values for GST, PAN, address, and registration from multiple Tally storage locations.
 
@@ -642,19 +651,19 @@ When Tally stores **multiple distinct values** for the same concept, the script 
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--ledgers PATH` | `tally_ledgers_final.xml` | Ledger master |
-| `--vouchers-dir PATH` | `vouchers_by_final_list` | Input XML folder |
-| `--output-dir PATH` | `vouchers_by_final_list_json` | Output JSON folder |
+| `--ledgers PATH` | `tally_ledgers_final.xml` (next to script) | Ledger master |
+| `--vouchers-dir PATH` | `vouchers_by_final_list` (next to script) | Input XML folder |
+| `--output-dir PATH` | `vouchers_by_final_list_json` (next to script) | Output JSON folder |
 | `--dry-run` | off | Parse only, do not write files |
 
 **Run:**
 
 ```bash
-python vouchers/vouchers_to_json_with_ledger.py \
+python output/to_json.py \
   --ledgers data/tally_ledgers_final.xml \
   --vouchers-dir data/vouchers_by_final_list \
   --output-dir data/vouchers_by_final_list_json
-python vouchers/vouchers_to_json_with_ledger.py \
+python output/to_json.py \
   --ledgers data/tally_ledgers_final.xml \
   --vouchers-dir data/vouchers_by_final_list \
   --output-dir data/vouchers_by_final_list_json --dry-run
@@ -666,8 +675,10 @@ python vouchers/vouchers_to_json_with_ledger.py \
 
 ### 11. `apply_expense_blocklist.py` — LLM blocklist filter (TDS mode)
 
+**Location:** `tds/apply_expense_blocklist.py`
+
 **Role:** Reads a list of ledger names (the output of
-`list_expense_or_fixed_asset_ledgers.py`, or any JSON array / one-name-per-line
+`analyze/list_expense_ledgers.py`, or any JSON array / one-name-per-line
 text file) and uses Claude (Anthropic API) to identify which names fall under
 any of the 11 blocklist categories defined in `expense_blocklist_categories.json`
 (discount, round-off, bad debts, P&L on sale of asset, prior period, write-off,
@@ -696,10 +707,10 @@ applies these nuances uniformly.
 | Flag | Default | Effect |
 |---|---|---|
 | `--input PATH` | required | JSON array or one-name-per-line text file of ledger names |
-| `--config PATH` | `expense_blocklist_categories.json` | Categories config |
-| `--output PATH` | `expense_filtered.json` | Filtered list (input minus blocklisted) |
-| `--report PATH` | `expense_blocklist_report.json` | Per-name audit report |
-| `--cache PATH` | `expense_blocklist_cache.json` | Persistent decision cache |
+| `--config PATH` | `expense_blocklist_categories.json` (next to script) | Categories config |
+| `--output PATH` | `expense_filtered.json` (next to script) | Filtered list (input minus blocklisted) |
+| `--report PATH` | `expense_blocklist_report.json` (next to script) | Per-name audit report |
+| `--cache PATH` | `expense_blocklist_cache.json` (next to script) | Persistent decision cache |
 | `--model NAME` | `claude-opus-4-7` | Anthropic model ID |
 | `--batch-size N` | 25 | Names per LLM call |
 | `--max-tokens N` | 32000 | Output cap per batch (streaming used) |
@@ -710,8 +721,10 @@ applies these nuances uniformly.
 
 ```bash
 # 1. Produce the raw expense list
-python classify/list_expense_or_fixed_asset_ledgers.py \
-  --xml data/tally_ledgers_final.xml --json > expense_raw.json
+python analyze/list_expense_ledgers.py \
+  --xml data/tally_ledgers_final.xml \
+  --daybook data/daybook_01042024_to_31032025.xml \
+  --json > expense_raw.json
 
 # 2. First time: dry-run, review the report
 python tds/apply_expense_blocklist.py --input expense_raw.json \
@@ -763,40 +776,38 @@ because the system prompt still contains the full intent text.
 
 **Environment:** Requires `ANTHROPIC_API_KEY` (see [Prerequisites](#prerequisites--installation)).
 
-**Library use:** `from apply_expense_blocklist import filter_names, load_config` — `filter_names` takes a list of names and returns `(kept_names, audit_report)`.
+**Library use:** `from tds.apply_expense_blocklist import filter_names, load_config` — `filter_names` takes a list of names and returns `(kept_names, audit_report)`.
 
-**Downstream consumers:** `final_list.py --filtered-expense ...`, `tds_expense_wrapper.py` (uses `filter_names` internally).
+**Downstream consumers:** `analyze/final_list.py --filtered-expense ...`, `tds/tds_expense_wrapper.py` (uses `filter_names` internally).
 
 ---
 
 ### 12. `tds_expense_wrapper.py` — End-to-end TDS orchestrator
 
+**Location:** `tds/tds_expense_wrapper.py`
+
 **Role:** One-command end-to-end pipeline for TDS analysis. Combines:
-1. The `vouchers_liability_no_expense_yes.py` ledger classification (imported, not duplicated)
-2. The `apply_expense_blocklist.py` LLM filter (imported, applied to the expense set)
-3. The voucher scan (same `collect_matching_liability_names` as `final_list.py`)
-4. The duties/cash/bank/branch group exclusion (same `exclude_groups_ledgers` as `final_list.py`)
+1. Ledger classification via `core/ledger_sets.py` (`load_expense_and_liability_sets`)
+2. LLM expense blocklist filter via `tds/apply_expense_blocklist.py` (`filter_names`)
+3. Voucher scan via `analyze/detect_cross_vouchers.py` (`collect_matching_liability_names`)
+4. Duties/cash/bank/branch group exclusion via `core/groups.py` (`parent_names_from_roots`, `ledgers_with_parent_in`)
 
-Produces the same kind of output `final_list.py` produces — a sorted list of
-liability/current-asset ledger names suitable for `split_daybook_by_final_list.py`
+Produces the same kind of output `analyze/final_list.py` produces — a sorted list of
+liability/current-asset ledger names suitable for `output/split_by_ledger.py`
 — but with TDS-irrelevant ledgers stripped before the voucher scan.
-
-**No existing script is modified** — the wrapper imports public functions from
-`vouchers_liability_no_expense_yes.py`, `exclude_groups_ledgers.py`, and
-`apply_expense_blocklist.py`, then composes them.
 
 **CLI flags:**
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--ledgers PATH` | `tally_ledgers_final.xml` | Ledger master |
-| `--daybook PATH` | `daybook_01042024_to_31032025.xml` | Daybook XML |
-| `--groups-xml PATH` | `tally_groups_final.xml` | Group hierarchy (for Stage 4 exclusion) |
-| `--config PATH` | `expense_blocklist_categories.json` | Blocklist categories |
-| `--output PATH` | `test_filtered.txt` | Final ledger-name list (sorted) |
-| `--report PATH` | `expense_blocklist_report.json` | LLM audit report |
-| `--filtered-expense PATH` | `expense_filtered.json` | Intermediate: blocklisted expense set (for diffing) |
-| `--cache PATH` | `expense_blocklist_cache.json` | Persistent LLM cache |
+| `--ledgers PATH` | `tally_ledgers_final.xml` (next to script) | Ledger master |
+| `--daybook PATH` | `daybook_01042024_to_31032025.xml` (next to script) | Daybook XML |
+| `--groups-xml PATH` | `tally_groups_final.xml` (next to script) | Group hierarchy (for Stage 4 exclusion) |
+| `--config PATH` | `expense_blocklist_categories.json` (next to script) | Blocklist categories |
+| `--output PATH` | `test_filtered.txt` (next to script) | Final ledger-name list (sorted) |
+| `--report PATH` | `expense_blocklist_report.json` (next to script) | LLM audit report |
+| `--filtered-expense PATH` | `expense_filtered.json` (next to script) | Intermediate: blocklisted expense set (for diffing) |
+| `--cache PATH` | `expense_blocklist_cache.json` (next to script) | Persistent LLM cache |
 | `--model NAME` | `claude-opus-4-7` | Anthropic model ID |
 | `--batch-size N` | 25 | Names per LLM call |
 | `--max-tokens N` | 32000 | Output cap per batch |
@@ -815,15 +826,15 @@ python tds/tds_expense_wrapper.py \
 
 **Environment:** Requires `ANTHROPIC_API_KEY`.
 
-**Downstream consumers:** `split_daybook_by_final_list.py` (consumes `test_filtered.txt`).
+**Downstream consumers:** `output/split_by_ledger.py` (consumes the final ledger list).
 
 ---
 
 ### 13. `expense_blocklist_categories.json` — Blocklist config
 
 A static JSON file transcribing the 11 PDF blocklist categories (intent text +
-reference keywords). Read by both `apply_expense_blocklist.py` and
-`tds_expense_wrapper.py`. Edit this file to adjust the category definitions or
+reference keywords). Read by both `tds/apply_expense_blocklist.py` and
+`tds/tds_expense_wrapper.py`. Edit this file to adjust the category definitions or
 keywords. The file is the single source of truth — both the LLM system prompt
 and the audit report's category numbers are derived from it.
 
@@ -890,8 +901,10 @@ every downstream script picks it up automatically — no extra flags needed.
 
 ```bash
 # 1. Produce raw expense list
-python classify/list_expense_or_fixed_asset_ledgers.py \
-  --xml data/tally_ledgers_final.xml --json > expense_raw.json
+python analyze/list_expense_ledgers.py \
+  --xml data/tally_ledgers_final.xml \
+  --daybook data/daybook_01042024_to_31032025.xml \
+  --json > expense_raw.json
 
 # 2. LLM filter — writes data/expense_filtered.json + data/expense_blocklist_report.json
 python tds/apply_expense_blocklist.py --input expense_raw.json \
@@ -907,17 +920,17 @@ python run.py
 
 Each downstream script logs the source it's using on stderr so you can confirm:
 ```
-[vouchers_liability_no_expense_yes] Auto-detected filter sidecar: expense_filtered.json (next to ledgers XML).
-[vouchers_liability_no_expense_yes] Loaded 1652 filtered expense names from expense_filtered.json.
+[core.ledger_sets] Auto-detected filter sidecar: expense_filtered.json (next to ledgers XML).
+[core.ledger_sets] Loaded 1652 filtered expense names from expense_filtered.json.
 ```
 
 To **opt out of auto-detect** (e.g. one-off non-TDS run while a sidecar exists),
-run `run.py` without `--tds` — it calls `final_list.py` which ignores the sidecar
+run `run.py` without `--tds` — it calls `analyze/final_list.py` which ignores the sidecar
 by default unless TDS mode is active. Or pass `--no-filter` directly to any
-individual script:</p>
+individual script:
 
 ```bash
-python vouchers/final_list.py \
+python analyze/final_list.py \
   --ledgers data/tally_ledgers_final.xml \
   --daybook data/daybook_01042024_to_31032025.xml \
   --groups-xml data/tally_groups_final.xml --no-filter
@@ -947,16 +960,15 @@ python vouchers/final_list.py \
 
 | File | Produced by | Root element | Contents |
 |---|---|---|---|
-| `tally_groups_final.xml` | `tally_groups.py` | `<TALLYGROUPS>` | Group tree with `NATURE`, `ROOTPRIMARY`, `FINANCIALSTATEMENT` |
-| `tally_ledgers_final.xml` | `tally_ledger_master.py` | `<TALLYLEDGERS>` | Enriched ledger master (GST, mailing, bank, tax, classification) |
-| `daybook_DDMMYYYY_to_DDMMYYYY.xml` | `tally_daybook.py` | `<TALLYDAYBOOK>` | Deduplicated voucher register for the requested date range |
-| `vouchers_by_final_list/*.xml` | `split_daybook_by_final_list.py` | `<TALLYDAYBOOK>` | Per-ledger slice — all vouchers referencing that ledger |
-| `vouchers_by_final_list_json/*.json` | `vouchers_to_json_with_ledger.py` | JSON object | `ledger_master` + `daybook` keys |
+| `tally_groups_final.xml` | `export/tally_groups.py` | `<TALLYGROUPS>` | Group tree with `NATURE`, `ROOTPRIMARY`, `FINANCIALSTATEMENT` |
+| `tally_ledgers_final.xml` | `export/tally_ledger_master.py` | `<TALLYLEDGERS>` | Enriched ledger master (GST, mailing, bank, tax, classification) |
+| `daybook_DDMMYYYY_to_DDMMYYYY.xml` | `export/tally_daybook.py` | `<TALLYDAYBOOK>` | Deduplicated voucher register for the requested date range |
+| `vouchers_by_final_list/*.xml` | `output/split_by_ledger.py` | `<TALLYDAYBOOK>` | Per-ledger slice — all vouchers referencing that ledger |
+| `vouchers_by_final_list_json/*.json` | `output/to_json.py` | JSON object | `ledger_master` + `daybook` keys |
 | `expense_blocklist_categories.json` | (committed) | JSON array | The 11 TDS blocklist categories — intent + keywords |
-| `expense_filtered.json` | `apply_expense_blocklist.py` / `tds_expense_wrapper.py` | JSON array | Expense set with blocklisted names removed |
-| `expense_blocklist_report.json` | `apply_expense_blocklist.py` / `tds_expense_wrapper.py` | JSON array | Per-name audit: blocklisted, category, reason, source |
-| `expense_blocklist_cache.json` | `apply_expense_blocklist.py` / `tds_expense_wrapper.py` | JSON object | Persistent decision cache (key = lowercased name) |
-| `test_filtered.txt` | `tds_expense_wrapper.py` | text (one name per line) | Final TDS-filtered ledger list — use as input to `split_daybook_by_final_list.py` |
+| `expense_filtered.json` | `tds/apply_expense_blocklist.py` / `tds/tds_expense_wrapper.py` | JSON array | Expense set with blocklisted names removed |
+| `expense_blocklist_report.json` | `tds/apply_expense_blocklist.py` / `tds/tds_expense_wrapper.py` | JSON array | Per-name audit: blocklisted, category, reason, source |
+| `expense_blocklist_cache.json` | `tds/apply_expense_blocklist.py` / `tds/tds_expense_wrapper.py` | JSON object | Persistent decision cache (key = lowercased name) |
 
 ---
 
@@ -966,22 +978,30 @@ python vouchers/final_list.py \
 TALLY_EXPORT/
 │
 ├── export/                                     ← Phase 1: live Tally connection scripts
+│   ├── __init__.py
 │   ├── tally_groups.py
 │   ├── tally_ledger_master.py
 │   └── tally_daybook.py
 │
-├── classify/                                   ← Phase 2: offline ledger classification
-│   ├── list_liability_or_current_assets_ledgers.py
-│   ├── list_expense_or_fixed_asset_ledgers.py
-│   └── exclude_groups_ledgers.py
+├── core/                                       ← Shared utilities imported by multiple modules
+│   ├── __init__.py
+│   ├── groups.py                               ← BFS group-tree closure + ledger parent filter
+│   └── ledger_sets.py                          ← load_expense_and_liability_sets() + TDS auto-detect
 │
-├── vouchers/                                   ← Phase 3: voucher pattern & slicing
-│   ├── vouchers_liability_no_expense_yes.py
-│   ├── final_list.py
-│   ├── split_daybook_by_final_list.py
-│   └── vouchers_to_json_with_ledger.py
+├── analyze/                                    ← Phase 2: offline ledger classification & pattern detection
+│   ├── __init__.py
+│   ├── list_liability_ledgers.py               ← list NATURE=Liability / ROOTPRIMARY=Current Assets
+│   ├── list_expense_ledgers.py                 ← list NATURE=Expense / ROOTPRIMARY=Fixed Assets
+│   ├── detect_cross_vouchers.py                ← cross-voucher pattern detection algorithm
+│   └── final_list.py                           ← pattern ledgers minus group-excluded ledgers
+│
+├── output/                                     ← Phase 3: file generation (XML slices + JSON)
+│   ├── __init__.py
+│   ├── split_by_ledger.py                      ← one XML per target ledger
+│   └── to_json.py                              ← XML slices → JSON with ledger master metadata
 │
 ├── tds/                                        ← Phase 4 (optional): LLM-based TDS analysis
+│   ├── __init__.py
 │   ├── apply_expense_blocklist.py
 │   └── tds_expense_wrapper.py
 │
@@ -993,20 +1013,20 @@ TALLY_EXPORT/
 │   ├── tally_groups_final.xml                  ← generated by export/tally_groups.py
 │   ├── tally_ledgers_final.xml                 ← generated by export/tally_ledger_master.py
 │   ├── daybook_DDMMYYYY_to_DDMMYYYY.xml        ← generated by export/tally_daybook.py
-│   ├── final.txt                               ← generated by vouchers/final_list.py
+│   ├── final.txt                               ← generated by analyze/final_list.py
 │   ├── expense_filtered.json                   ← TDS mode: blocklist-filtered expense set
 │   ├── expense_blocklist_report.json           ← TDS mode: per-name audit report
 │   ├── expense_blocklist_cache.json            ← TDS mode: persistent LLM decision cache
-│   ├── test_filtered.txt                       ← TDS mode: final ledger list from tds_expense_wrapper.py
-│   ├── vouchers_by_final_list/                 ← generated by vouchers/split_daybook_by_final_list.py
+│   ├── vouchers_by_final_list/                 ← generated by output/split_by_ledger.py
 │   │   ├── Creditor A.xml
 │   │   ├── Creditor B.xml
 │   │   └── ...  (one file per target ledger)
-│   └── vouchers_by_final_list_json/            ← generated by vouchers/vouchers_to_json_with_ledger.py
+│   └── vouchers_by_final_list_json/            ← generated by output/to_json.py
 │       ├── Creditor A.json
 │       ├── Creditor B.json
 │       └── ...  (one file per target ledger)
 │
+├── run.py                                      ← single entry point for the full pipeline
 ├── requirements.txt                            ← runtime deps (requests + anthropic)
 └── README.md
 ```
@@ -1047,7 +1067,7 @@ Daybook files can be hundreds of megabytes. All scripts that scan the daybook or
 
 ### 4. Voucher Pattern Matching
 
-`vouchers_liability_no_expense_yes.py` (and its descendants) classify each `<ENTRY>` line by cross-referencing the line's `LEDGERNAME` against two pre-built ledger sets, then checks `ISDEEMEDPOSITIVE`:
+`analyze/detect_cross_vouchers.py` classifies each `<ENTRY>` line by cross-referencing the line's `LEDGERNAME` against two pre-built ledger sets (loaded from `core/ledger_sets.py`), then checks `ISDEEMEDPOSITIVE`:
 
 ```
 ISDEEMEDPOSITIVE = "Yes"  →  debit-like  (increases asset / decreases liability)
@@ -1055,8 +1075,7 @@ ISDEEMEDPOSITIVE = "No"   →  credit-like (decreases asset / increases liabilit
 ```
 
 A voucher **matches** only if it contains **both**:
-- An entry with `ISDEEMEDPOSITIVE == "Yes"` on an **expense or fixed-asset** ledger
-  (excluding `discount*` and `round off` / `roundoff` names), **and**
+- An entry with `ISDEEMEDPOSITIVE == "Yes"` on an **expense or fixed-asset** ledger, **and**
 - An entry with `ISDEEMEDPOSITIVE == "No"` on a **liability or current-asset** ledger.
 
 The output collects the liability/current-asset names from condition 2, unioned across all matching vouchers.
@@ -1065,13 +1084,36 @@ The output collects the liability/current-asset names from condition 2, unioned 
 
 ### 5. Field Resolution Cascade
 
-Tally stores the same business identifier (GSTIN, PAN, state) in multiple XML paths for historical reasons. `vouchers_to_json_with_ledger.py` checks each path in priority order, uses the first non-empty value as canonical, and records the winning path in `field_sources` — so you can trace exactly where each value came from.
+Tally stores the same business identifier (GSTIN, PAN, state) in multiple XML paths for historical reasons. `output/to_json.py` checks each path in priority order, uses the first non-empty value as canonical, and records the winning path in `field_sources` — so you can trace exactly where each value came from.
 
 ---
 
 ### 6. Filename Sanitisation + Collision Handling
 
 Ledger names often contain characters that are illegal in filenames (`< > : " / \ | ? *`). The splitter replaces all such characters with `_`. If two distinct ledger names produce the same sanitised filename, subsequent files are suffixed `_2`, `_3`, etc.
+
+---
+
+### 7. Package Import Pattern
+
+Every script that imports across package boundaries adds one line at the top to ensure the project root is on `sys.path`:
+
+```python
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+```
+
+Then uses absolute package imports:
+
+```python
+from core.groups import parent_names_from_roots, ledgers_with_parent_in, DEFAULT_ROOT_GROUPS
+from core.ledger_sets import load_expense_and_liability_sets
+from analyze.detect_cross_vouchers import collect_matching_liability_names
+from analyze.final_list import load_final_ledger_names
+```
+
+This means scripts can be run both directly (`python analyze/final_list.py`) and imported as modules, without any `PYTHONPATH` setup required.
 
 ---
 
@@ -1195,7 +1237,7 @@ The table below shows **typical** output sizes from one full financial year expo
 | Empty or malformed XML from Tally | HTTP server not enabled, or wrong port | In Tally go to **F12 → Advanced Configuration** and confirm the port (default 9000) |
 | `xml.etree.ElementTree.ParseError` | Illegal characters survived `clean_tally_xml` | Inspect the raw response and extend the sanitiser regex |
 | Ledger fields missing from output (no GSTIN etc.) | `FETCH` spec has fields unsupported by your Tally build | Comment out unknown field names in `tally_ledger_master.py`'s FETCH list |
-| `_lookup_error` in JSON output | Ledger was renamed in Tally after the split was run | Re-run `split_daybook_by_final_list.py` then `vouchers_to_json_with_ledger.py` |
+| `_lookup_error` in JSON output | Ledger was renamed in Tally after the split was run | Re-run `output/split_by_ledger.py` then `output/to_json.py` |
 | Fewer output files than expected | Pattern filter found no matching vouchers for some ledgers | Verify the daybook date range covers the relevant transaction period |
 | Filename collisions (`_2`, `_3` suffix files) | Two ledger names sanitise to the same string | Expected and handled automatically; both files are written correctly |
 | Very slow daybook export | Large company with many vouchers per month | Normal — each month is a separate HTTP round-trip with a 900 s read timeout |
@@ -1204,7 +1246,7 @@ The table below shows **typical** output sizes from one full financial year expo
 
 ## Notes & Caveats
 
-- **Single entry point:** `run.py` is the recommended way to run the pipeline. It handles file paths, phase ordering, and cross-module imports automatically. Individual scripts can still be run directly — they self-register their directories so no `PYTHONPATH` setup is needed.
+- **Single entry point:** `run.py` is the recommended way to run the pipeline. It handles file paths, phase ordering, and cross-module imports automatically. Individual scripts can still be run directly — they insert the project root into `sys.path` at startup so no `PYTHONPATH` setup is needed.
 - **Hardcoded endpoint:** All export scripts POST to `http://localhost:9000`. If Tally runs on a different port or remote host, update the URL constant in each export script.
 - **No incremental sync:** Every export is a full pull. There is no delta-sync or checkpoint mechanism — re-run from scratch for updated data.
 - **Consistency requirement:** The primary-group → NATURE mapping is duplicated in `export/tally_groups.py` and `export/tally_ledger_master.py` (`PRIMARY_NATURE` / `_get_root_primary`). If you add or rename a primary group, update **both** scripts to keep enrichment fields consistent.

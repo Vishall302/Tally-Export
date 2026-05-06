@@ -98,7 +98,7 @@ def main() -> None:
     else:
         with open(FINAL_LIST, "w") as out_f:
             step("Offline [1/3]  compute target ledger list",
-                 [PY, "vouchers/final_list.py",
+                 [PY, "analyze/final_list.py",
                   "--ledgers",   str(LEDGERS),
                   "--daybook",   str(DAYBOOK),
                   "--groups-xml", str(GROUPS)],
@@ -108,14 +108,14 @@ def main() -> None:
 
     # ── Phase 3: Split + JSON ────────────────────────────────────────────────
     step("Offline [2/3]  split daybook into per-ledger XML slices",
-         [PY, "vouchers/split_daybook_by_final_list.py",
+         [PY, "output/split_by_ledger.py",
           "--ledgers",    str(LEDGERS),
           "--daybook",    str(DAYBOOK),
           "--groups-xml", str(GROUPS),
           "--out-dir",    str(VOUCHERS_XML)])
 
     step("Offline [3/3]  convert XML slices to JSON",
-         [PY, "vouchers/vouchers_to_json_with_ledger.py",
+         [PY, "output/to_json.py",
           "--ledgers",      str(LEDGERS),
           "--vouchers-dir", str(VOUCHERS_XML),
           "--output-dir",   str(VOUCHERS_JSON)])

@@ -3,7 +3,7 @@
 Pure-LLM expense blocklist filter for the TDS analysis pipeline.
 
 Takes a list of ledger names (the output of ``list_expense_or_fixed_asset_ledgers.py``
-or the in-memory set built by ``vouchers_liability_no_expense_yes.load_expense_and_liability_sets``)
+or the in-memory set built by ``core.ledger_sets.load_expense_and_liability_sets``)
 and asks Claude to identify the ones that fall under any of the 11 PDF blocklist
 categories (Discount, Round-off, Bad debts, P&L on sale of asset, Prior period,
 Write-off, Bank charges, Late fees & penalties, GST, Income tax, ESI/PF).
