@@ -309,6 +309,11 @@ def _classify_batch(
         + "\n".join(f"{i + 1}. {name}" for i, name in enumerate(batch))
     )
 
+    # Tag the call with the licensing run id (if any) so the proxy attributes
+    # cost to the right run. No-op in direct mode.
+    run_id = os.environ.get("TDS_RUN_ID", "").strip()
+    extra = {"extra_headers": {"X-Run-Id": run_id}} if run_id else {}
+
     # Use streaming so large max_tokens (with adaptive thinking) doesn't hit the SDK's
     # non-streaming guard. .get_final_message() gives us the assembled response.
     with client.messages.stream(
@@ -325,6 +330,7 @@ def _classify_batch(
         tools=[tool_schema],
         tool_choice={"type": "tool", "name": "record_decisions"},
         messages=[{"role": "user", "content": user_msg}],
+        **extra,
     ) as stream:
         message = stream.get_final_message()
 
@@ -461,13 +467,22 @@ def filter_names(
                 "The 'anthropic' package is not installed. Run: pip install anthropic"
             ) from exc
 
-        if api_key:
+        # Licensed mode: route through the in-house licensing proxy using the
+        # per-client license token instead of a raw key (proxy holds the real key).
+        proxy_url = os.environ.get("TDS_PROXY_URL", "").strip().rstrip("/")
+        license_token = os.environ.get("TDS_LICENSE_TOKEN", "").strip()
+        if proxy_url and license_token:
+            client = anthropic.Anthropic(
+                api_key=license_token, base_url=f"{proxy_url}/anthropic"
+            )
+        elif api_key:
             client = anthropic.Anthropic(api_key=api_key)
         elif os.environ.get("ANTHROPIC_API_KEY"):
             client = anthropic.Anthropic()
         else:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Set the env var or pass api_key=..."
+                "No Anthropic access configured. Set ANTHROPIC_API_KEY, configure "
+                "licensed mode (TDS_PROXY_URL + TDS_LICENSE_TOKEN), or pass api_key=..."
             )
 
         # Pre-compute the things every batch needs (cheap, no API calls).
