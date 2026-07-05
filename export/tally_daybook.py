@@ -174,13 +174,17 @@ def name_txt(el, tag):
     return txt(el, tag)
 
 
-def export_daybook_to_path(start: str, end: str, out_path: str | None = None) -> Path:
+def export_daybook_to_path(
+    start: str, end: str, out_path: str | None = None, progress_cb=None
+) -> Path:
     """Fetch the complete daybook from Tally and write a normalized XML file.
 
     Args:
         start: Start date in DD-MM-YYYY format.
         end: End date in DD-MM-YYYY format.
         out_path: Optional output file path. Defaults to daybook_DDMMYYYY_to_DDMMYYYY.xml.
+        progress_cb: Optional callable ``(done_chunks, total_chunks, label)`` invoked
+            after each monthly chunk is fetched, for UI progress reporting.
 
     Returns:
         Path to the written XML file.
@@ -221,6 +225,8 @@ def export_daybook_to_path(start: str, end: str, out_path: str | None = None) ->
                     continue
                 seen_guid.add(g)
             all_vouchers.append(v)
+        if progress_cb is not None:
+            progress_cb(i, len(chunks), f"{st} … {et}")
 
     print(f"Total vouchers fetched: {len(all_vouchers)}")
 

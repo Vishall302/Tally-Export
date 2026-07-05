@@ -64,6 +64,136 @@ from core.ledger_sets import load_expense_and_liability_sets  # noqa: E402
 from analyze.detect_cross_vouchers import collect_matching_liability_names  # noqa: E402
 
 
+def run_tds_selection(
+    *,
+    ledgers: Path,
+    daybook: Path,
+    groups_xml: Path,
+    config: Path,
+    output: Path,
+    report: Path,
+    filtered_expense: Path,
+    cache: Path,
+    model: str = "claude-haiku-4-5",
+    batch_size: int = 25,
+    max_tokens: int = 32000,
+    no_thinking: bool = False,
+    no_reasons: bool = False,
+    concurrency: int = 1,
+    as_json: bool = False,
+    no_group_exclusion: bool = False,
+    progress_cb=None,
+) -> list[str]:
+    """Run the 4-stage TDS ledger selection (LLM blocklist + voucher scan +
+    group exclusion) and write the sorted result to *output*.
+
+    Returns the sorted list of final ledger names. This is the importable core
+    that both ``main()`` (CLI) and the webapp pipeline call. ``progress_cb`` — if
+    given — is invoked as ``progress_cb(stage: str, detail: str)`` at each stage.
+    Requires ``ANTHROPIC_API_KEY`` in the environment (LLM filter is always on).
+    """
+    def _emit(stage: str, detail: str = "") -> None:
+        if progress_cb is not None:
+            progress_cb(stage, detail)
+
+    # Validate inputs.
+    if not ledgers.is_file():
+        raise FileNotFoundError(f"Ledgers file not found: {ledgers}")
+    if not config.is_file():
+        raise FileNotFoundError(f"Config file not found: {config}")
+    if not daybook.is_file():
+        raise FileNotFoundError(f"Daybook file not found: {daybook}")
+    if not no_group_exclusion and not groups_xml.is_file():
+        raise FileNotFoundError(f"Groups file not found: {groups_xml}")
+
+    # ----- Stage 1: build the raw sets from the ledgers XML -----
+    _emit("classify", "Classifying ledgers from XML")
+    print("Stage 1: classifying ledgers from XML (auto-detect off)...", file=sys.stderr)
+    expense_or_fixed, liability_or_current = load_expense_and_liability_sets(
+        ledgers, auto_detect=False
+    )
+    print(
+        f"  expense_or_fixed   : {len(expense_or_fixed)} names\n"
+        f"  liability_or_current: {len(liability_or_current)} names",
+        file=sys.stderr,
+    )
+
+    # ----- Stage 2: pure-LLM blocklist filter on the expense set -----
+    _emit("llm_filter", "LLM expense blocklist filter")
+    print("\nStage 2: LLM blocklist filter (this can take a minute on first run)...",
+          file=sys.stderr)
+    cfg = load_config(config)
+    raw_names = sorted(expense_or_fixed)
+    kept_names, report_data = filter_names(
+        names=raw_names,
+        config=cfg,
+        cache_path=cache,
+        model=model,
+        batch_size=batch_size,
+        max_tokens_per_batch=max_tokens,
+        no_thinking=no_thinking,
+        no_reasons=no_reasons,
+        concurrency=max(1, concurrency),
+    )
+    filtered_expense_set = set(kept_names)
+
+    # Always write the audit artifacts so the user can review them.
+    write_report(report, report_data)
+    write_names(filtered_expense, kept_names, as_json=True)
+    blocked = len(raw_names) - len(kept_names)
+    print(
+        f"\n  Blocklisted: {blocked} | Kept: {len(kept_names)} / {len(raw_names)}\n"
+        f"  Audit report   : {report}\n"
+        f"  Filtered set   : {filtered_expense}",
+        file=sys.stderr,
+    )
+
+    # ----- Stage 3: voucher scan with the filtered expense set -----
+    _emit("voucher_scan", "Scanning daybook vouchers")
+    print("\nStage 3: scanning daybook vouchers with filtered expense set...",
+          file=sys.stderr)
+    matching = collect_matching_liability_names(
+        daybook, filtered_expense_set, liability_or_current
+    )
+    print(f"  voucher-pattern ledger names: {len(matching)}", file=sys.stderr)
+
+    # ----- Stage 4: group-tree exclusion (same as final_list.py) -----
+    if no_group_exclusion:
+        print("\nStage 4: SKIPPED (no_group_exclusion).", file=sys.stderr)
+        final_set = matching
+    else:
+        _emit("group_exclusion", "Excluding duties/cash/bank/branch groups")
+        print(
+            "\nStage 4: subtracting ledgers under duties/cash/bank/branch groups...",
+            file=sys.stderr,
+        )
+        parent_names, _missing_roots = parent_names_from_roots(
+            str(groups_xml), list(DEFAULT_ROOT_GROUPS)
+        )
+        excluded = set(ledgers_with_parent_in(str(ledgers), parent_names))
+        print(
+            f"  group-excluded ledger names: {len(excluded)}\n"
+            f"  intersection (removed)     : {len(matching & excluded)}",
+            file=sys.stderr,
+        )
+        final_set = matching - excluded
+
+    sorted_names = sorted(final_set)
+    print(f"\nFinal ledger names: {len(sorted_names)}", file=sys.stderr)
+
+    # ----- Write final output -----
+    with output.open("w", encoding="utf-8", newline="\n") as f:
+        if as_json:
+            json.dump(sorted_names, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        else:
+            for n in sorted_names:
+                f.write(n + "\n")
+    print(f"\nFinal output written to {output}", file=sys.stderr)
+    _emit("selection_done", f"{len(sorted_names)} ledgers selected")
+    return sorted_names
+
+
 def main() -> None:
     base = Path(__file__).resolve().parent
     p = argparse.ArgumentParser(
@@ -141,103 +271,28 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    # Validate inputs.
-    if not args.ledgers.is_file():
-        print(f"Ledgers file not found: {args.ledgers}", file=sys.stderr)
-        sys.exit(1)
-    if not args.config.is_file():
-        print(f"Config file not found: {args.config}", file=sys.stderr)
-        sys.exit(1)
-    if not args.daybook.is_file():
-        print(f"Daybook file not found: {args.daybook}", file=sys.stderr)
-        sys.exit(1)
-    if not args.no_group_exclusion and not args.groups_xml.is_file():
-        print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
-        sys.exit(1)
-
-    # ----- Stage 1: build the raw sets from the ledgers XML -----
-    # auto_detect=False: the wrapper produces the filtered set itself in Stage 2.
-    # If a sidecar from a previous run is present we ignore it to avoid confusion;
-    # the LLM cache makes re-running cheap anyway.
-    print("Stage 1: classifying ledgers from XML (auto-detect off)...", file=sys.stderr)
-    expense_or_fixed, liability_or_current = load_expense_and_liability_sets(
-        args.ledgers, auto_detect=False
-    )
-    print(
-        f"  expense_or_fixed   : {len(expense_or_fixed)} names\n"
-        f"  liability_or_current: {len(liability_or_current)} names",
-        file=sys.stderr,
-    )
-
-    # ----- Stage 2: pure-LLM blocklist filter on the expense set -----
-    print("\nStage 2: LLM blocklist filter (this can take a minute on first run)...",
-          file=sys.stderr)
-    config = load_config(args.config)
-    raw_names = sorted(expense_or_fixed)
-    kept_names, report = filter_names(
-        names=raw_names,
-        config=config,
-        cache_path=args.cache,
-        model=args.model,
-        batch_size=args.batch_size,
-        max_tokens_per_batch=args.max_tokens,
-        no_thinking=args.no_thinking,
-        no_reasons=args.no_reasons,
-        concurrency=max(1, args.concurrency),
-    )
-    filtered_expense_set = set(kept_names)
-
-    # Always write the audit artifacts so the user can review them.
-    write_report(args.report, report)
-    write_names(args.filtered_expense, kept_names, as_json=True)
-    blocked = len(raw_names) - len(kept_names)
-    print(
-        f"\n  Blocklisted: {blocked} | Kept: {len(kept_names)} / {len(raw_names)}\n"
-        f"  Audit report   : {args.report}\n"
-        f"  Filtered set   : {args.filtered_expense}",
-        file=sys.stderr,
-    )
-
-    # ----- Stage 3: voucher scan with the filtered expense set -----
-    print("\nStage 3: scanning daybook vouchers with filtered expense set...",
-          file=sys.stderr)
-    matching = collect_matching_liability_names(
-        args.daybook, filtered_expense_set, liability_or_current
-    )
-    print(f"  voucher-pattern ledger names: {len(matching)}", file=sys.stderr)
-
-    # ----- Stage 4: group-tree exclusion (same as final_list.py) -----
-    if args.no_group_exclusion:
-        print("\nStage 4: SKIPPED (--no-group-exclusion).", file=sys.stderr)
-        final_set = matching
-    else:
-        print(
-            "\nStage 4: subtracting ledgers under duties/cash/bank/branch groups...",
-            file=sys.stderr,
+    try:
+        run_tds_selection(
+            ledgers=args.ledgers,
+            daybook=args.daybook,
+            groups_xml=args.groups_xml,
+            config=args.config,
+            output=args.output,
+            report=args.report,
+            filtered_expense=args.filtered_expense,
+            cache=args.cache,
+            model=args.model,
+            batch_size=args.batch_size,
+            max_tokens=args.max_tokens,
+            no_thinking=args.no_thinking,
+            no_reasons=args.no_reasons,
+            concurrency=args.concurrency,
+            as_json=args.json,
+            no_group_exclusion=args.no_group_exclusion,
         )
-        parent_names, _missing_roots = parent_names_from_roots(
-            str(args.groups_xml), list(DEFAULT_ROOT_GROUPS)
-        )
-        excluded = set(ledgers_with_parent_in(str(args.ledgers), parent_names))
-        print(
-            f"  group-excluded ledger names: {len(excluded)}\n"
-            f"  intersection (removed)     : {len(matching & excluded)}",
-            file=sys.stderr,
-        )
-        final_set = matching - excluded
-
-    sorted_names = sorted(final_set)
-    print(f"\nFinal ledger names: {len(sorted_names)}", file=sys.stderr)
-
-    # ----- Write final output -----
-    with args.output.open("w", encoding="utf-8", newline="\n") as f:
-        if args.json:
-            json.dump(sorted_names, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        else:
-            for n in sorted_names:
-                f.write(n + "\n")
-    print(f"\nFinal output written to {args.output}", file=sys.stderr)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
