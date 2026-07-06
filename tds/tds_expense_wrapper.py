@@ -52,6 +52,7 @@ if str(_ROOT) not in sys.path:
 from tds.apply_expense_blocklist import (  # noqa: E402
     filter_names,
     load_config,
+    summarize_llm_failures,
     write_names,
     write_report,
 )
@@ -82,6 +83,7 @@ def run_tds_selection(
     concurrency: int = 1,
     as_json: bool = False,
     no_group_exclusion: bool = False,
+    fail_on_llm_error: bool = True,
     progress_cb=None,
 ) -> list[str]:
     """Run the 4-stage TDS ledger selection (LLM blocklist + voucher scan +
@@ -134,8 +136,18 @@ def run_tds_selection(
         no_thinking=no_thinking,
         no_reasons=no_reasons,
         concurrency=max(1, concurrency),
+        fail_on_llm_error=fail_on_llm_error,
     )
     filtered_expense_set = set(kept_names)
+
+    llm_fail = summarize_llm_failures(report_data)
+    if llm_fail["failed_names"]:
+        _emit(
+            "warning",
+            f"AI expense filter partly failed — {llm_fail['failed_names']} of "
+            f"{llm_fail['total_names']} ledger names could not be AI-reviewed "
+            f"and were kept in the audit. Reason: {llm_fail['reason']}",
+        )
 
     # Always write the audit artifacts so the user can review them.
     write_report(report, report_data)

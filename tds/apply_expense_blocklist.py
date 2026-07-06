@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
@@ -63,6 +64,19 @@ from typing import Any, Iterable
 
 # Anthropic SDK is imported lazily so `--no-llm-check` style probes don't fail
 # on machines that haven't installed it yet. The actual call site imports it.
+
+log = logging.getLogger(__name__)
+
+# Proxy/API statuses that won't succeed on retry (bad/revoked licence, credit
+# cap reached, paused). One batch hitting these means every later batch will
+# too — short-circuit instead of hammering the licensing proxy.
+_PERMANENT_STATUS = {401, 402, 403}
+
+
+def _is_permanent_error(exc: Exception) -> bool:
+    # anthropic.APIStatusError and subclasses carry .status_code; getattr keeps
+    # the SDK import lazy.
+    return getattr(exc, "status_code", None) in _PERMANENT_STATUS
 
 
 # --------------------------------------------------------------------------- #
@@ -314,9 +328,10 @@ def _classify_batch(
     run_id = os.environ.get("TDS_RUN_ID", "").strip()
     extra = {"extra_headers": {"X-Run-Id": run_id}} if run_id else {}
 
-    # Use streaming so large max_tokens (with adaptive thinking) doesn't hit the SDK's
-    # non-streaming guard. .get_final_message() gives us the assembled response.
-    with client.messages.stream(
+    # Non-streaming on purpose: the response is one small tool call, and plain
+    # request/response survives CDNs and reverse proxies that mangle SSE. The
+    # explicit timeout also skips the SDK's large-max_tokens streaming guard.
+    message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
         thinking=thinking_cfg,
@@ -330,9 +345,9 @@ def _classify_batch(
         tools=[tool_schema],
         tool_choice={"type": "tool", "name": "record_decisions"},
         messages=[{"role": "user", "content": user_msg}],
+        timeout=600.0,
         **extra,
-    ) as stream:
-        message = stream.get_final_message()
+    )
 
     # Find the tool_use block. tool_choice forces it, so it must exist.
     tool_block = next(
@@ -389,6 +404,8 @@ def filter_names(
     no_thinking: bool = False,
     no_reasons: bool = False,
     concurrency: int = 1,
+    max_retries: int = 2,
+    fail_on_llm_error: bool = True,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """
     Run the pure-LLM blocklist filter.
@@ -421,6 +438,16 @@ def filter_names(
         Number of parallel LLM calls in flight at once. ``1`` = sequential
         (current behavior). Higher values reduce wall-clock time linearly
         until you hit Anthropic rate limits.
+    max_retries : int
+        Extra attempts per batch on transient errors (exponential backoff:
+        2s, 4s, ...). Permanent licence errors (401/402/403) are never retried
+        and short-circuit all remaining batches.
+    fail_on_llm_error : bool
+        If True (default), a batch that still fails after retries raises and
+        aborts the run. If False, its names are kept conservatively with
+        ``source="error-keep"`` (never written to the cache) and the run
+        continues — use ``summarize_llm_failures`` on the report to surface
+        a warning.
 
     Returns
     -------
@@ -513,26 +540,55 @@ def filter_names(
         ]
         n_batches = len(batches)
 
-        # Worker: one batch -> raw decisions list (or raises).
-        def _run_one(batch: list[str]) -> list[dict[str, Any]]:
-            try:
-                return _classify_batch(
-                    client, model, system_prompt, batch,
-                    max_tokens_per_batch, tool_schema, thinking_cfg,
-                )
-            except Exception as exc:  # noqa: BLE001 — broad on purpose
-                # One retry for transient API blips. With concurrency, don't
-                # block other workers — sleep is short.
-                time.sleep(2)
-                return _classify_batch(
-                    client, model, system_prompt, batch,
-                    max_tokens_per_batch, tool_schema, thinking_cfg,
-                )
-
         # Shared mutable state — protect with a lock when concurrency > 1.
         cache_lock = threading.Lock()
         completed_count = 0
         wall_t0 = time.monotonic()
+        # First permanent licence error seen (401/402/403). Once set, every
+        # remaining batch fails instantly instead of hammering the proxy.
+        hard_fail: dict[str, Exception | None] = {"exc": None}
+
+        # Worker: one batch -> raw decisions list (or raises).
+        def _run_one(batch: list[str]) -> list[dict[str, Any]]:
+            if hard_fail["exc"] is not None:
+                raise hard_fail["exc"]
+            last_exc: Exception | None = None
+            for attempt in range(1 + max_retries):
+                try:
+                    return _classify_batch(
+                        client, model, system_prompt, batch,
+                        max_tokens_per_batch, tool_schema, thinking_cfg,
+                    )
+                except Exception as exc:  # noqa: BLE001 — broad on purpose
+                    last_exc = exc
+                    if _is_permanent_error(exc):
+                        hard_fail["exc"] = exc
+                        break
+                    if attempt < max_retries:
+                        time.sleep(2 * (2 ** attempt))
+            assert last_exc is not None
+            raise last_exc
+
+        def _merge_error_keep(batch: list[str], exc: Exception) -> None:
+            """Record a failed batch as conservative keeps. Never cached, so a
+            re-run after the problem is fixed re-classifies these names."""
+            log.warning(
+                "Blocklist batch failed permanently (%d names kept): %s",
+                len(batch), exc,
+            )
+            reason = (
+                f"AI classification unavailable ({exc}); kept conservatively "
+                "(not cached)."
+            )
+            with cache_lock:
+                for original in batch:
+                    decisions_by_key[original.lower()] = {
+                        "name": original,
+                        "blocklisted": False,
+                        "category": None,
+                        "reason": reason,
+                        "source": "error-keep",
+                    }
 
         def _merge_batch_decisions(batch: list[str], decisions: list[dict[str, Any]]) -> None:
             """Index decisions by name, build records, update cache + decisions_by_key."""
@@ -610,7 +666,18 @@ def filter_names(
                         flush=True,
                     )
                 t0 = time.monotonic()
-                decisions = _run_one(batch)
+                try:
+                    decisions = _run_one(batch)
+                except Exception as exc:  # noqa: BLE001
+                    if fail_on_llm_error:
+                        raise
+                    if progress:
+                        print(
+                            f"failed: {exc}. Keeping {len(batch)} names.",
+                            file=sys.stderr,
+                        )
+                    _merge_error_keep(batch, exc)
+                    continue
                 _merge_batch_decisions(batch, decisions)
                 if progress:
                     print(f"done ({time.monotonic() - t0:.1f}s)", file=sys.stderr)
@@ -628,15 +695,19 @@ def filter_names(
                     try:
                         decisions = fut.result()
                     except Exception as exc:  # noqa: BLE001
-                        # Final fallback: don't crash the whole run for one batch.
-                        # Mark every name in the batch as default-keep.
+                        if fail_on_llm_error:
+                            # In-flight batches finish fast: hard_fail (if set)
+                            # makes the remaining workers raise immediately.
+                            raise
                         if progress:
                             print(
                                 f"\n    Batch failed permanently: {exc}. "
-                                f"Defaulting {len(batch)} names to keep.",
+                                f"Keeping {len(batch)} names.",
                                 file=sys.stderr,
                             )
-                        decisions = []
+                        _merge_error_keep(batch, exc)
+                        completed_count += 1
+                        continue
                     _merge_batch_decisions(batch, decisions)
                     completed_count += 1
                     if progress:
@@ -666,6 +737,17 @@ def filter_names(
             kept.append(n)
 
     return kept, report
+
+
+def summarize_llm_failures(report: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count ``error-keep`` records in a ``filter_names`` report so callers can
+    surface a warning when the AI filter partly failed."""
+    failed = [r for r in report if r.get("source") == "error-keep"]
+    return {
+        "failed_names": len(failed),
+        "total_names": len(report),
+        "reason": failed[0]["reason"] if failed else "",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -729,7 +811,7 @@ def main() -> None:
     )
     p.add_argument(
         "--max-tokens", type=int, default=32000,
-        help="Output token cap per batch (default: 32000). Streaming is used.",
+        help="Output token cap per batch (default: 32000).",
     )
     p.add_argument(
         "--text", action="store_true",
@@ -759,6 +841,12 @@ def main() -> None:
              "Higher values reduce wall-clock time roughly linearly until you hit "
              "Anthropic rate limits. Try 5 for cheap mode.",
     )
+    p.add_argument(
+        "--keep-on-llm-error", action="store_true",
+        help="Do not abort when a batch still fails after retries: keep its "
+             "names in the audit (source=error-keep, never cached) and continue. "
+             "Default is to fail hard.",
+    )
     args = p.parse_args()
 
     if not args.input.is_file():
@@ -784,6 +872,7 @@ def main() -> None:
         no_thinking=args.no_thinking,
         no_reasons=args.no_reasons,
         concurrency=max(1, args.concurrency),
+        fail_on_llm_error=not args.keep_on_llm_error,
     )
 
     write_report(args.report, report)
