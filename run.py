@@ -66,6 +66,9 @@ def main() -> None:
     EXPENSE_FILT  = DATA / "expense_filtered.json"
     BLOCKLIST_RPT = DATA / "expense_blocklist_report.json"
     BLOCKLIST_CFG = ROOT / "config" / "expense_blocklist_categories.json"
+    PARTY_CFG     = ROOT / "config" / "party_blocklist_categories.json"
+    PARTY_RPT     = DATA / "party_blocklist_report.json"
+    PARTY_CACHE   = DATA / "party_blocklist_cache.json"
     FINAL_LIST    = DATA / "final.txt"
     VOUCHERS_XML  = DATA / "vouchers_by_final_list"
     VOUCHERS_JSON = DATA / "vouchers_by_final_list_json"
@@ -93,6 +96,9 @@ def main() -> None:
             "--filtered-expense", str(EXPENSE_FILT),
             "--report",           str(BLOCKLIST_RPT),
             "--output",           str(FINAL_LIST),
+            "--party-config",     str(PARTY_CFG),
+            "--party-report",     str(PARTY_RPT),
+            "--party-cache",      str(PARTY_CACHE),
         ]
         step("TDS     [1/3]  blocklist filter + voucher scan", tds_cmd)
     else:

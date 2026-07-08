@@ -56,13 +56,18 @@ from tds.apply_expense_blocklist import (  # noqa: E402
     write_names,
     write_report,
 )
+from tds.apply_party_blocklist import (  # noqa: E402
+    filter_parties,
+    load_parent_groups,
+    summarize_party_llm_failures,
+)
 from core.groups import (  # noqa: E402
     DEFAULT_ROOT_GROUPS,
     ledgers_with_parent_in,
     parent_names_from_roots,
 )
 from core.ledger_sets import load_expense_and_liability_sets  # noqa: E402
-from analyze.detect_cross_vouchers import collect_matching_liability_names  # noqa: E402
+from analyze.detect_cross_vouchers import collect_matching_liability_amounts  # noqa: E402
 
 
 def run_tds_selection(
@@ -84,19 +89,45 @@ def run_tds_selection(
     as_json: bool = False,
     no_group_exclusion: bool = False,
     fail_on_llm_error: bool = True,
+    min_party_amount: float = 100.0,
+    party_config: Path | None = None,
+    party_report: Path | None = None,
+    party_cache: Path | None = None,
+    no_party_filter: bool = False,
+    party_dry_run: bool = False,
     progress_cb=None,
 ) -> list[str]:
-    """Run the 4-stage TDS ledger selection (LLM blocklist + voucher scan +
-    group exclusion) and write the sorted result to *output*.
+    """Run the TDS ledger selection (LLM expense blocklist + voucher scan +
+    group exclusion + materiality floor + LLM party blocklist) and write the
+    sorted result to *output*.
 
     Returns the sorted list of final ledger names. This is the importable core
     that both ``main()`` (CLI) and the webapp pipeline call. ``progress_cb`` — if
     given — is invoked as ``progress_cb(stage: str, detail: str)`` at each stage.
     Requires ``ANTHROPIC_API_KEY`` in the environment (LLM filter is always on).
+
+    False-positive controls (Stages 4.5 and 5):
+      - ``min_party_amount`` — drop parties whose TOTAL ``abs(AMOUNT)`` credited
+        across all matching vouchers is below this floor (default ₹100; 0
+        disables). Kills paise-level rounding-entry parties.
+      - Party blocklist — LLM pass over the selected names (with parent groups)
+        that removes statutory-payable / provision / prepaid / suspense ledgers.
+        ``no_party_filter=True`` skips it; ``party_dry_run=True`` writes the
+        audit report but does not remove anything. Defaults for the artifact
+        paths sit next to *output*.
     """
     def _emit(stage: str, detail: str = "") -> None:
         if progress_cb is not None:
             progress_cb(stage, detail)
+
+    # Default party-filter artifact paths sit next to the final output.
+    _base_cfg = Path(__file__).resolve().parent.parent / "config"
+    if party_config is None:
+        party_config = _base_cfg / "party_blocklist_categories.json"
+    if party_report is None:
+        party_report = output.parent / "party_blocklist_report.json"
+    if party_cache is None:
+        party_cache = output.parent / "party_blocklist_cache.json"
 
     # Validate inputs.
     if not ledgers.is_file():
@@ -107,6 +138,8 @@ def run_tds_selection(
         raise FileNotFoundError(f"Daybook file not found: {daybook}")
     if not no_group_exclusion and not groups_xml.is_file():
         raise FileNotFoundError(f"Groups file not found: {groups_xml}")
+    if not no_party_filter and not party_config.is_file():
+        raise FileNotFoundError(f"Party blocklist config not found: {party_config}")
 
     # ----- Stage 1: build the raw sets from the ledgers XML -----
     _emit("classify", "Classifying ledgers from XML")
@@ -164,9 +197,10 @@ def run_tds_selection(
     _emit("voucher_scan", "Scanning daybook vouchers")
     print("\nStage 3: scanning daybook vouchers with filtered expense set...",
           file=sys.stderr)
-    matching = collect_matching_liability_names(
+    matching_amounts = collect_matching_liability_amounts(
         daybook, filtered_expense_set, liability_or_current
     )
+    matching = set(matching_amounts)
     print(f"  voucher-pattern ledger names: {len(matching)}", file=sys.stderr)
 
     # ----- Stage 4: group-tree exclusion (same as final_list.py) -----
@@ -189,6 +223,91 @@ def run_tds_selection(
             file=sys.stderr,
         )
         final_set = matching - excluded
+
+    # ----- Stage 4.5: materiality floor (rounding-entry parties) -----
+    party_audit: list[dict] = []
+    if min_party_amount > 0:
+        _emit("materiality_floor", f"Dropping parties credited under ₹{min_party_amount:g}")
+        floored = {n for n in final_set if matching_amounts.get(n, 0.0) < min_party_amount}
+        if floored:
+            print(
+                f"\nStage 4.5: materiality floor ₹{min_party_amount:g} — dropping "
+                f"{len(floored)} name(s):",
+                file=sys.stderr,
+            )
+            for n in sorted(floored):
+                amt = matching_amounts.get(n, 0.0)
+                print(f"  ₹{amt:,.2f}  {n}", file=sys.stderr)
+                party_audit.append({
+                    "name": n,
+                    "parent_group": "",
+                    "blocklisted": True,
+                    "category": None,
+                    "reason": (
+                        f"Total credited in matching vouchers ₹{amt:,.2f} is below the "
+                        f"materiality floor ₹{min_party_amount:g} (rounding-entry noise)."
+                    ),
+                    "source": "materiality-floor",
+                })
+            final_set = final_set - floored
+        else:
+            print(
+                f"\nStage 4.5: materiality floor ₹{min_party_amount:g} — nothing to drop.",
+                file=sys.stderr,
+            )
+    else:
+        print("\nStage 4.5: SKIPPED (min_party_amount=0).", file=sys.stderr)
+
+    # ----- Stage 5: LLM party blocklist (statutory/provision/prepaid/suspense) -----
+    if no_party_filter:
+        print("\nStage 5: SKIPPED (no_party_filter).", file=sys.stderr)
+    elif final_set:
+        _emit("party_filter", "AI check: removing non-party ledgers")
+        print("\nStage 5: LLM party blocklist over the selected names...", file=sys.stderr)
+        parents = load_parent_groups(ledgers)
+        party_cfg = load_config(party_config)
+        kept_parties, party_llm_report = filter_parties(
+            parties=[(n, parents.get(n, "")) for n in sorted(final_set)],
+            config=party_cfg,
+            cache_path=party_cache,
+            model=model,
+            batch_size=batch_size,
+            max_tokens_per_batch=max_tokens,
+            no_thinking=no_thinking,
+            no_reasons=no_reasons,
+            fail_on_llm_error=fail_on_llm_error,
+        )
+        party_audit.extend(party_llm_report)
+
+        party_fail = summarize_party_llm_failures(party_llm_report)
+        if party_fail["failed_names"]:
+            _emit(
+                "warning",
+                f"AI party filter partly failed — {party_fail['failed_names']} of "
+                f"{party_fail['total_names']} party names could not be AI-reviewed "
+                f"and were kept. Reason: {party_fail['reason']}",
+            )
+
+        blocked_parties = sorted(final_set - set(kept_parties))
+        if party_dry_run:
+            print(
+                f"  DRY-RUN: {len(blocked_parties)} name(s) flagged but NOT removed:",
+                file=sys.stderr,
+            )
+            for n in blocked_parties:
+                print(f"    {n}", file=sys.stderr)
+        else:
+            if blocked_parties:
+                print(f"  Removed {len(blocked_parties)} non-party ledger(s):", file=sys.stderr)
+                for n in blocked_parties:
+                    print(f"    {n}", file=sys.stderr)
+            else:
+                print("  No non-party ledgers found.", file=sys.stderr)
+            final_set = set(kept_parties)
+
+    # Always write the party audit so every removal (floor + LLM) is reviewable.
+    write_report(party_report, party_audit)
+    print(f"  Party audit report: {party_report}", file=sys.stderr)
 
     sorted_names = sorted(final_set)
     print(f"\nFinal ledger names: {len(sorted_names)}", file=sys.stderr)
@@ -281,6 +400,42 @@ def main() -> None:
         "--concurrency", type=int, default=1,
         help="Parallel LLM calls in flight at once (default: 1).",
     )
+    p.add_argument(
+        "--min-party-amount", type=float, default=100.0,
+        help="Materiality floor: drop parties whose total credited amount across "
+             "matching vouchers is below this (default: 100; 0 disables). Kills "
+             "paise-level rounding-entry parties.",
+    )
+    p.add_argument(
+        "--party-config", type=Path, default=None,
+        help="Party blocklist categories JSON "
+             "(default: config/party_blocklist_categories.json).",
+    )
+    p.add_argument(
+        "--party-report", type=Path, default=None,
+        help="Party-filter audit report (default: party_blocklist_report.json "
+             "next to --output).",
+    )
+    p.add_argument(
+        "--party-cache", type=Path, default=None,
+        help="Persistent party-decision cache (default: party_blocklist_cache.json "
+             "next to --output).",
+    )
+    p.add_argument(
+        "--no-party-filter", action="store_true",
+        help="Skip the Stage-5 LLM party blocklist entirely.",
+    )
+    p.add_argument(
+        "--party-dry-run", action="store_true",
+        help="Run the party blocklist and write its audit report, but do NOT "
+             "remove flagged names from the final list. Use on first rollout.",
+    )
+    p.add_argument(
+        "--keep-on-llm-error", action="store_true",
+        help="Do not abort when an LLM batch fails after retries (expense or "
+             "party filter): keep its names conservatively and continue. This is "
+             "the mode the webapp runs in.",
+    )
     args = p.parse_args()
 
     try:
@@ -301,6 +456,13 @@ def main() -> None:
             concurrency=args.concurrency,
             as_json=args.json,
             no_group_exclusion=args.no_group_exclusion,
+            fail_on_llm_error=not args.keep_on_llm_error,
+            min_party_amount=args.min_party_amount,
+            party_config=args.party_config,
+            party_report=args.party_report,
+            party_cache=args.party_cache,
+            no_party_filter=args.no_party_filter,
+            party_dry_run=args.party_dry_run,
         )
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)

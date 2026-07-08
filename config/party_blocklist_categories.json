@@ -1,0 +1,93 @@
+[
+  {
+    "id": 1,
+    "name": "Statutory dues payable to government",
+    "intent": "Ledgers representing tax or statutory amounts deducted, collected, or provided for payment to the government or a statutory authority — not a person or business the company contracts with. The 'payee' behind this ledger is the government itself, so TDS can never apply to amounts credited here. Covers TDS/TCS payable, provident fund (PF/EPF/VPF) payable, ESI/ESIC payable, labour welfare fund payable, professional tax payable, GST payable (including reverse-charge/RCM payable), advance tax, and income-tax payable ledgers.",
+    "keywords": [
+      "tds payable",
+      "tcs payable",
+      "pf payable",
+      "epf payable",
+      "vpf payable",
+      "provident fund payable",
+      "esi payable",
+      "esic payable",
+      "labour welfare fund payable",
+      "lwf payable",
+      "professional tax payable",
+      "pt payable",
+      "gst payable",
+      "cgst payable",
+      "sgst payable",
+      "igst payable",
+      "rcm payable",
+      "gst payable rcm",
+      "reverse charge payable",
+      "advance tax",
+      "income tax payable",
+      "wealth tax payable",
+      "equalisation levy payable"
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Provision and accrual aggregate ledgers",
+    "intent": "Internal year-end accounting buckets that accrue expenses before the actual payee is known or billed — provision for expenses, provision for audit fees, outstanding/accrued expenses, and aggregate 'expenses payable' ledgers. These have no single external payee; the real party ledger is credited later, in the settlement voucher, and gets selected on its own. Only aggregate accounting buckets belong here — a ledger named after a specific person or business is NEVER this category.",
+    "keywords": [
+      "provision for expenses",
+      "provisions for exp",
+      "provision for audit fees",
+      "provision for salary",
+      "provision for bonus",
+      "provision for gratuity",
+      "outstanding expenses",
+      "outstanding liabilities",
+      "accrued expenses",
+      "expenses payable",
+      "audit fees payable",
+      "salary payable"
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Tax-recoverable, prepaid, and asset-adjustment ledgers",
+    "intent": "Balance-sheet adjustment ledgers on the asset side that get credited during expense bookings (amortisation, input-credit adjustment) but represent no payee: GST/CGST/SGST/IGST recoverable, input tax credit (ITC), TDS/TCS receivable, and prepaid expense ledgers (prepaid insurance, prepaid rent, prepaid AMC). Crediting these ledgers moves value between the company's own balance-sheet buckets — no external party is being paid.",
+    "keywords": [
+      "gst recoverable",
+      "cgst recoverable",
+      "sgst recoverable",
+      "igst recoverable",
+      "igst recoverable rcm",
+      "input tax credit",
+      "itc receivable",
+      "tds receivable",
+      "tcs receivable",
+      "prepaid expenses",
+      "prepaid insurance",
+      "prepaid rent",
+      "prepaid amc",
+      "advance tax receivable"
+    ]
+  },
+  {
+    "id": 4,
+    "name": "Internal suspense, rounding, and clearing ledgers",
+    "intent": "Internal offset ledgers used to balance entries or park unresolved differences — suspense accounts, round-off, short & excess, exchange-difference, payroll clearing, and inter-branch/inter-company clearing accounts. No external party exists behind these ledgers.",
+    "keywords": [
+      "suspense",
+      "round off",
+      "rounding off",
+      "short & excess",
+      "short and excess",
+      "exchange difference",
+      "exchange fluctuation",
+      "forex difference",
+      "payroll clearing",
+      "salary clearing",
+      "inter branch",
+      "inter-branch",
+      "inter company clearing",
+      "clearing account"
+    ]
+  }
+]

@@ -4,8 +4,9 @@ data/
 # Data files at any level
 *.xml
 *.json
-# ...but the blocklist categories config IS source-controlled (TDS mode)
+# ...but the blocklist categories configs ARE source-controlled (TDS mode)
 !config/expense_blocklist_categories.json
+!config/party_blocklist_categories.json
 
 # Local secrets — never commit
 .env

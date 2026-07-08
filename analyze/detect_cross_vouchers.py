@@ -93,6 +93,53 @@ from core.ledger_sets import (  # noqa: E402
 )
 
 
+def collect_matching_liability_amounts(
+    daybook_xml: Path,
+    expense_or_fixed: set[str],
+    liability_or_current: set[str],
+) -> dict[str, float]:
+    """
+    Walk every ``<VOUCHER>`` in the daybook; for vouchers that match the
+    expense‑Yes + liability‑No pattern, collect all liability/current‑asset
+    ledger names that appeared as ``ISDEEMEDPOSITIVE`` No in that voucher,
+    accumulating ``sum(abs(AMOUNT))`` per name across all matching vouchers.
+
+    Absolute amounts are summed on purpose: a credit and its reversal should
+    make a name *more* visible for review, not net out to zero and vanish.
+    A name credited with a missing/unparseable AMOUNT still appears (with 0.0),
+    so ``set(result)`` is exactly the name set the original scan produced.
+    """
+    out: dict[str, float] = {}
+    for _event, voucher in ET.iterparse(str(daybook_xml), events=("end",)):
+        if voucher.tag != "VOUCHER":
+            continue
+
+        expense_yes = False
+        liability_no_lines: list[tuple[str, float]] = []
+
+        ledge = voucher.find("LEDGERENTRIES")
+        if ledge is not None:
+            for entry in ledge.findall("ENTRY"):
+                lname = (entry.findtext("LEDGERNAME") or "").strip()
+                deemed = (entry.findtext("ISDEEMEDPOSITIVE") or "").strip()
+                if lname in expense_or_fixed and deemed == "Yes":
+                    expense_yes = True
+                if lname in liability_or_current and deemed == "No":
+                    try:
+                        amount = abs(float((entry.findtext("AMOUNT") or "0").strip() or 0))
+                    except ValueError:
+                        amount = 0.0
+                    liability_no_lines.append((lname, amount))
+
+        if expense_yes and liability_no_lines:
+            for lname, amount in liability_no_lines:
+                out[lname] = out.get(lname, 0.0) + amount
+
+        voucher.clear()
+
+    return out
+
+
 def collect_matching_liability_names(
     daybook_xml: Path,
     expense_or_fixed: set[str],
@@ -105,30 +152,11 @@ def collect_matching_liability_names(
 
     Returns a set (unique names across all matching vouchers).
     """
-    out: set[str] = set()
-    for _event, voucher in ET.iterparse(str(daybook_xml), events=("end",)):
-        if voucher.tag != "VOUCHER":
-            continue
-
-        expense_yes = False
-        liability_no_names: list[str] = []
-
-        ledge = voucher.find("LEDGERENTRIES")
-        if ledge is not None:
-            for entry in ledge.findall("ENTRY"):
-                lname = (entry.findtext("LEDGERNAME") or "").strip()
-                deemed = (entry.findtext("ISDEEMEDPOSITIVE") or "").strip()
-                if lname in expense_or_fixed and deemed == "Yes":
-                    expense_yes = True
-                if lname in liability_or_current and deemed == "No":
-                    liability_no_names.append(lname)
-
-        if expense_yes and liability_no_names:
-            out.update(liability_no_names)
-
-        voucher.clear()
-
-    return out
+    return set(
+        collect_matching_liability_amounts(
+            daybook_xml, expense_or_fixed, liability_or_current
+        )
+    )
 
 
 def main() -> None:
