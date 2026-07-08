@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 """
-For each ledger name produced by ``analyze/final_list.py`` (same logic and defaults), scan
-the daybook XML and write one ``TALLYDAYBOOK`` XML per name containing every voucher
-that references that ledger (any ``LEDGERNAME`` under the voucher, or
-``PARTYLEDGERNAME`` on the voucher root).
+Scan the daybook XML and write one ``TALLYDAYBOOK`` XML per final-list ledger,
+containing every voucher that references that ledger (any ``LEDGERNAME`` under
+the voucher, or ``PARTYLEDGERNAME`` on the voucher root).
 
 Output files go under a folder (default: ``vouchers_by_final_list``) next to this script.
 Filenames are sanitized copies of ledger names (unsafe characters replaced).
 
-Inherited filtering from final_list.py includes exclusion of discount/round-off
-ledgers in the expense/fixed-asset side of the voucher pattern.
+Where the ledger list comes from
+--------------------------------
+**Preferred (``--final-names FILE``):** load the exact final list from a file
+(JSON array or one-name-per-line, e.g. the pipeline's ``final.txt``) and slice
+those names verbatim — no re-derivation. This is the SINGLE SOURCE OF TRUTH and
+the mode the ``run.py`` pipeline uses. It is the only way to honour the full TDS
+selection, because the materiality floor (Stage 4.5) and the LLM party blocklist
+(Stage 5) live ONLY inside ``tds/tds_expense_wrapper.py`` and are not reproduced
+by ``load_final_ledger_names`` below.
 
-TDS mode (optional)
--------------------
+**Fallback (no ``--final-names``):** re-derive the list via
+``analyze/final_list.py::load_final_ledger_names``. WARNING: that path implements
+only the 3 rule-based stages (expense blocklist → voucher scan → group
+exclusion). It does NOT apply the materiality floor or the party blocklist, so a
+TDS-mode run that omits ``--final-names`` would resurrect the dropped ledgers
+(e.g. TDS Payable, ESIC Payable). Kept for standalone/offline back-compat only.
+
+TDS mode (optional, fallback path only)
+---------------------------------------
 Pass ``--filtered-expense FILE`` to load a pre-filtered expense set from a JSON
 array or one-name-per-line text file (typically the output of
-``apply_expense_blocklist.py``). When given, that file is used as the
-expense_or_fixed set instead of the XML classification — this is the same
-``--filtered-expense`` flag that ``analyze/final_list.py`` accepts. The two scripts
-must use the same flag for the blocklist filter to flow consistently through
-the pipeline; otherwise the per-ledger XML slices in ``vouchers_by_final_list/``
-would still include vouchers from blocklisted ledgers.
+``apply_expense_blocklist.py``). Only relevant when re-deriving (no
+``--final-names``); ignored when ``--final-names`` is supplied.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from analyze.final_list import load_final_ledger_names  # noqa: E402
+from core.ledger_sets import load_name_list  # noqa: E402
 
 
 def read_tally_daybook_root_attribs(daybook_xml: Path) -> dict[str, str]:
@@ -131,6 +141,15 @@ def main() -> None:
         help="Folder for one XML per final-list ledger (created if missing)",
     )
     p.add_argument(
+        "--final-names",
+        type=Path,
+        default=None,
+        help="Authoritative final ledger list (JSON array or one-name-per-line, "
+             "e.g. the pipeline's final.txt). When given, slice exactly these names "
+             "and skip re-derivation — the ONLY mode that honours the materiality "
+             "floor + party blocklist. Pipelines should always pass this.",
+    )
+    p.add_argument(
         "--filtered-expense",
         type=Path,
         default=None,
@@ -147,26 +166,37 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    if not args.ledgers.is_file():
-        print(f"Ledgers file not found: {args.ledgers}", file=sys.stderr)
-        sys.exit(1)
     if not args.daybook.is_file():
         print(f"Daybook file not found: {args.daybook}", file=sys.stderr)
         sys.exit(1)
-    if not args.groups_xml.is_file():
-        print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
-        sys.exit(1)
-    if args.filtered_expense is not None and not args.filtered_expense.is_file():
-        print(f"Filtered expense file not found: {args.filtered_expense}", file=sys.stderr)
-        sys.exit(1)
 
-    names = load_final_ledger_names(
-        args.ledgers,
-        args.daybook,
-        args.groups_xml,
-        args.filtered_expense,
-        auto_detect=not args.no_filter,
-    )
+    if args.final_names is not None:
+        # Preferred path: consume the authoritative list verbatim (no re-derivation).
+        if not args.final_names.is_file():
+            print(f"Final-names file not found: {args.final_names}", file=sys.stderr)
+            sys.exit(1)
+        # Sort for deterministic filenames + duplicate-stem numbering (final.txt is
+        # already sorted; sorting a set from JSON makes order independent of format).
+        names = sorted(load_name_list(args.final_names))
+    else:
+        # Fallback path: re-derive with the 3 rule-based stages only (no floor /
+        # party blocklist). Needs the ledger + groups XML.
+        if not args.ledgers.is_file():
+            print(f"Ledgers file not found: {args.ledgers}", file=sys.stderr)
+            sys.exit(1)
+        if not args.groups_xml.is_file():
+            print(f"Groups file not found: {args.groups_xml}", file=sys.stderr)
+            sys.exit(1)
+        if args.filtered_expense is not None and not args.filtered_expense.is_file():
+            print(f"Filtered expense file not found: {args.filtered_expense}", file=sys.stderr)
+            sys.exit(1)
+        names = load_final_ledger_names(
+            args.ledgers,
+            args.daybook,
+            args.groups_xml,
+            args.filtered_expense,
+            auto_detect=not args.no_filter,
+        )
     if not names:
         print("Final list is empty; nothing to write.", file=sys.stderr)
         sys.exit(0)

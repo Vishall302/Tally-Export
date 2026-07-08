@@ -113,12 +113,19 @@ def main() -> None:
         print(f"  → {FINAL_LIST.relative_to(ROOT)}: {count} ledgers", flush=True)
 
     # ── Phase 3: Split + JSON ────────────────────────────────────────────────
+    # Slice by the authoritative FINAL_LIST (single source of truth). Passing
+    # --final-names makes the splitter consume final.txt verbatim instead of
+    # re-deriving — the only way the materiality floor + party blocklist (TDS
+    # mode) survive into the per-ledger slices. In offline mode final.txt equals
+    # what the splitter would re-derive, so this is also correct there and skips
+    # a redundant daybook re-scan.
     step("Offline [2/3]  split daybook into per-ledger XML slices",
          [PY, "output/split_by_ledger.py",
-          "--ledgers",    str(LEDGERS),
-          "--daybook",    str(DAYBOOK),
-          "--groups-xml", str(GROUPS),
-          "--out-dir",    str(VOUCHERS_XML)])
+          "--ledgers",     str(LEDGERS),
+          "--daybook",     str(DAYBOOK),
+          "--groups-xml",  str(GROUPS),
+          "--final-names", str(FINAL_LIST),
+          "--out-dir",     str(VOUCHERS_XML)])
 
     step("Offline [3/3]  convert XML slices to JSON",
          [PY, "output/to_json.py",

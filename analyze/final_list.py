@@ -7,6 +7,17 @@ beside this script; add --json for JSON output.
 Expense/fixed-asset matching is inherited from detect_cross_vouchers.py,
 including exclusion of discount/round-off ledger names.
 
+Scope note (IMPORTANT)
+----------------------
+This implements only the 3 RULE-BASED stages: expense blocklist → voucher scan →
+group exclusion. It is NOT the full TDS selection. The materiality floor (Stage
+4.5) and the LLM party blocklist (Stage 5) live only in
+``tds/tds_expense_wrapper.py::run_tds_selection``, which writes the authoritative
+``final.txt``. For TDS-mode work, ``final.txt`` is the single source of truth —
+downstream steps (e.g. ``output/split_by_ledger.py``) must consume it via
+``--final-names`` rather than re-deriving here, or the floor/party-blocklist
+drops silently reappear.
+
 TDS mode (optional)
 -------------------
 Pass ``--filtered-expense FILE`` to load a pre-filtered expense set from a JSON array

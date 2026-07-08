@@ -28,6 +28,12 @@ Pipeline
    ``--report``. Always writes the filtered expense set to ``--filtered-expense``
    for transparency.
 
+The ``--output`` file (``final.txt`` in the pipeline) is the SINGLE SOURCE OF
+TRUTH for the final ledger list. Downstream steps must consume it — e.g.
+``output/split_by_ledger.py --final-names final.txt`` — and must NOT re-derive via
+``analyze/final_list.py``, which implements only stages 1-4 and would drop the
+materiality floor + party blocklist results.
+
 Usage
 -----
   python tds_expense_wrapper.py
