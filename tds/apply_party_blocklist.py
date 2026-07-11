@@ -56,8 +56,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -340,6 +342,7 @@ def filter_parties(
     progress: bool = True,
     no_thinking: bool = False,
     no_reasons: bool = False,
+    concurrency: int = 1,
     max_retries: int = 2,
     fail_on_llm_error: bool = True,
 ) -> tuple[list[str], list[dict[str, Any]]]:
@@ -352,8 +355,10 @@ def filter_parties(
     ``source``. Failed batches keep their names conservatively with
     ``source="error-keep"`` (never cached) when ``fail_on_llm_error=False``.
 
-    Party lists are small (typically < 300 names), so classification is
-    sequential — no concurrency knob on purpose.
+    ``concurrency`` is the number of parallel LLM calls in flight at once
+    (default 1 = sequential, the old behavior). Real client party lists run to
+    hundreds of names — 10+ batches — so the same thread-pool pattern as
+    ``apply_expense_blocklist.filter_names`` applies here.
     """
     cache: dict[str, dict[str, Any]] = load_cache(cache_path) if cache_path else {}
 
@@ -393,49 +398,49 @@ def filter_parties(
         intent_by_id = {cat["id"]: cat.get("intent", "") for cat in config}
 
         batches = [todo[i : i + batch_size] for i in range(0, len(todo), batch_size)]
-        hard_fail: Exception | None = None
+        n_batches = len(batches)
 
-        for i, batch in enumerate(batches):
-            if progress:
-                print(
-                    f"  Party batch {i + 1}/{len(batches)} ({len(batch)} names)...",
-                    file=sys.stderr,
-                    end=" ",
-                    flush=True,
-                )
-            t0 = time.monotonic()
-            decisions: list[dict[str, Any]] | None = None
-            last_exc: Exception | None = hard_fail
-            if hard_fail is None:
-                for attempt in range(1 + max_retries):
-                    try:
-                        decisions = _classify_batch(
-                            client, model, system_prompt, batch,
-                            max_tokens_per_batch, tool_schema, thinking_cfg,
-                        )
+        # Shared mutable state — protect with a lock when concurrency > 1.
+        cache_lock = threading.Lock()
+        completed_count = 0
+        wall_t0 = time.monotonic()
+        # First permanent licence error seen (401/402/403). Once set, every
+        # remaining batch fails instantly instead of hammering the proxy.
+        hard_fail: dict[str, Exception | None] = {"exc": None}
+
+        # Worker: one batch -> raw decisions list (or raises).
+        def _run_one(batch: list[tuple[str, str]]) -> list[dict[str, Any]]:
+            if hard_fail["exc"] is not None:
+                raise hard_fail["exc"]
+            last_exc: Exception | None = None
+            for attempt in range(1 + max_retries):
+                try:
+                    return _classify_batch(
+                        client, model, system_prompt, batch,
+                        max_tokens_per_batch, tool_schema, thinking_cfg,
+                    )
+                except Exception as exc:  # noqa: BLE001 — broad on purpose
+                    last_exc = exc
+                    if _is_permanent_error(exc):
+                        hard_fail["exc"] = exc
                         break
-                    except Exception as exc:  # noqa: BLE001 — broad on purpose
-                        last_exc = exc
-                        if _is_permanent_error(exc):
-                            hard_fail = exc
-                            break
-                        if attempt < max_retries:
-                            time.sleep(2 * (2 ** attempt))
+                    if attempt < max_retries:
+                        time.sleep(2 * (2 ** attempt))
+            assert last_exc is not None
+            raise last_exc
 
-            if decisions is None:
-                assert last_exc is not None
-                if fail_on_llm_error:
-                    raise last_exc
-                if progress:
-                    print(f"failed: {last_exc}. Keeping {len(batch)} names.", file=sys.stderr)
-                log.warning(
-                    "Party blocklist batch failed permanently (%d names kept): %s",
-                    len(batch), last_exc,
-                )
-                reason = (
-                    f"AI classification unavailable ({last_exc}); kept conservatively "
-                    "(not cached)."
-                )
+        def _merge_error_keep(batch: list[tuple[str, str]], exc: Exception) -> None:
+            """Record a failed batch as conservative keeps. Never cached, so a
+            re-run after the problem is fixed re-classifies these names."""
+            log.warning(
+                "Party blocklist batch failed permanently (%d names kept): %s",
+                len(batch), exc,
+            )
+            reason = (
+                f"AI classification unavailable ({exc}); kept conservatively "
+                "(not cached)."
+            )
+            with cache_lock:
                 for name, group in batch:
                     decisions_by_key[_cache_key(name, group)] = {
                         "name": name,
@@ -445,8 +450,11 @@ def filter_parties(
                         "reason": reason,
                         "source": "error-keep",
                     }
-                continue
 
+        def _merge_batch_decisions(
+            batch: list[tuple[str, str]], decisions: list[dict[str, Any]]
+        ) -> None:
+            """Index decisions by name, build records, update cache + decisions_by_key."""
             # Index decisions by lowercased bare name; tolerate a model that
             # echoed the "[group: ...]" annotation despite instructions.
             decisions_by_lc: dict[str, dict[str, Any]] = {}
@@ -459,6 +467,7 @@ def filter_parties(
                 if nm:
                     decisions_by_lc[nm.lower()] = d
 
+            local_records: list[tuple[str, dict[str, Any]]] = []
             for name, group in batch:
                 key = _cache_key(name, group)
                 d = decisions_by_lc.get(name.lower())
@@ -499,19 +508,83 @@ def filter_parties(
                             "reason": reason,
                             "source": "llm",
                         }
-                decisions_by_key[key] = record
+                local_records.append((key, record))
+
+            # Single critical section — fast.
+            with cache_lock:
+                for key, record in local_records:
+                    decisions_by_key[key] = record
+                    if cache_path is not None:
+                        cache[key] = {
+                            "name": record["name"],
+                            "parent_group": record["parent_group"],
+                            "blocklisted": record["blocklisted"],
+                            "category": record["category"],
+                            "reason": record["reason"],
+                        }
                 if cache_path is not None:
-                    cache[key] = {
-                        "name": record["name"],
-                        "parent_group": record["parent_group"],
-                        "blocklisted": record["blocklisted"],
-                        "category": record["category"],
-                        "reason": record["reason"],
-                    }
-            if cache_path is not None:
-                save_cache(cache_path, cache)
+                    save_cache(cache_path, cache)
+
+        # Sequential path (concurrency=1) — preserves old logging behavior.
+        if concurrency <= 1:
+            for i, batch in enumerate(batches):
+                if progress:
+                    print(
+                        f"  Party batch {i + 1}/{n_batches} ({len(batch)} names)...",
+                        file=sys.stderr,
+                        end=" ",
+                        flush=True,
+                    )
+                t0 = time.monotonic()
+                try:
+                    decisions = _run_one(batch)
+                except Exception as exc:  # noqa: BLE001
+                    if fail_on_llm_error:
+                        raise
+                    if progress:
+                        print(f"failed: {exc}. Keeping {len(batch)} names.", file=sys.stderr)
+                    _merge_error_keep(batch, exc)
+                    continue
+                _merge_batch_decisions(batch, decisions)
+                if progress:
+                    print(f"done ({time.monotonic() - t0:.1f}s)", file=sys.stderr)
+        else:
+            # Parallel path.
             if progress:
-                print(f"done ({time.monotonic() - t0:.1f}s)", file=sys.stderr)
+                print(
+                    f"  Dispatching {n_batches} party batches with "
+                    f"concurrency={concurrency}...",
+                    file=sys.stderr,
+                )
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = {ex.submit(_run_one, b): b for b in batches}
+                for fut in as_completed(futures):
+                    batch = futures[fut]
+                    try:
+                        decisions = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        if fail_on_llm_error:
+                            # In-flight batches finish fast: hard_fail (if set)
+                            # makes the remaining workers raise immediately.
+                            raise
+                        if progress:
+                            print(
+                                f"\n    Party batch failed permanently: {exc}. "
+                                f"Keeping {len(batch)} names.",
+                                file=sys.stderr,
+                            )
+                        _merge_error_keep(batch, exc)
+                        completed_count += 1
+                        continue
+                    _merge_batch_decisions(batch, decisions)
+                    completed_count += 1
+                    if progress:
+                        elapsed = time.monotonic() - wall_t0
+                        print(
+                            f"  [{completed_count}/{n_batches}] done "
+                            f"(wall {elapsed:.1f}s)",
+                            file=sys.stderr,
+                        )
 
     # Build outputs preserving input order.
     report: list[dict[str, Any]] = []
@@ -605,6 +678,10 @@ def main() -> None:
         help="Drop per-name 'reason' from the LLM output schema (cheap mode).",
     )
     p.add_argument(
+        "--concurrency", type=int, default=1,
+        help="Parallel LLM calls in flight at once (default: 1 = sequential).",
+    )
+    p.add_argument(
         "--keep-on-llm-error", action="store_true",
         help="Do not abort when a batch fails after retries: keep its names "
              "(source=error-keep, never cached) and continue.",
@@ -637,6 +714,7 @@ def main() -> None:
         max_tokens_per_batch=args.max_tokens,
         no_thinking=args.no_thinking,
         no_reasons=args.no_reasons,
+        concurrency=max(1, args.concurrency),
         fail_on_llm_error=not args.keep_on_llm_error,
     )
 

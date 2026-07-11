@@ -281,6 +281,7 @@ def run_tds_selection(
             max_tokens_per_batch=max_tokens,
             no_thinking=no_thinking,
             no_reasons=no_reasons,
+            concurrency=max(1, concurrency),
             fail_on_llm_error=fail_on_llm_error,
         )
         party_audit.extend(party_llm_report)
