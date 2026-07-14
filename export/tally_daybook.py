@@ -207,6 +207,13 @@ def export_daybook_to_path(
     print(f"\nFetching: {start_tally} to {end_tally} ({span_days} days) ...")
 
     # ── Fetch month-by-month to avoid Tally read-timeout on large ranges ──
+    # Tally's raw <TYPE>Voucher</TYPE> collection is not strictly clipped to
+    # SVFROMDATE/SVTODATE, so it can return vouchers outside the requested period
+    # (e.g. post-dated cheques beyond the year-end). Guard on the voucher DATE —
+    # still in raw YYYYMMDD form here — so out-of-period vouchers never leak through.
+    start_key = start_dt.strftime("%Y%m%d")
+    end_key = end_dt.strftime("%Y%m%d")
+    dropped_out_of_range = 0
     all_vouchers = []
     seen_guid = set()  # Track GUIDs to deduplicate vouchers across overlapping chunks
     chunks = list(iter_month_chunks(start_dt, end_dt))
@@ -219,6 +226,13 @@ def export_daybook_to_path(
         for v in root_xml.findall(".//VOUCHER"):
             if not v.get("VCHTYPE", "").strip():
                 continue
+            # Drop vouchers dated outside the requested period. Only filter on a
+            # well-formed YYYYMMDD date; a blank/short date is kept so downstream
+            # handling is unchanged. Lexical compare is valid for zero-padded dates.
+            d = txt(v, "DATE")
+            if len(d) == 8 and (d < start_key or d > end_key):
+                dropped_out_of_range += 1
+                continue
             g = txt(v, "GUID")
             if g:
                 if g in seen_guid:
@@ -228,6 +242,10 @@ def export_daybook_to_path(
         if progress_cb is not None:
             progress_cb(i, len(chunks), f"{st} … {et}")
 
+    if dropped_out_of_range:
+        print(
+            f"Dropped {dropped_out_of_range} voucher(s) outside {start_s}..{end_s}"
+        )
     print(f"Total vouchers fetched: {len(all_vouchers)}")
 
     # ── Voucher type summary ───────────────────────────────────────────────
