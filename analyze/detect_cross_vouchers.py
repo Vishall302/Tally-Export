@@ -99,40 +99,55 @@ def collect_matching_liability_amounts(
     liability_or_current: set[str],
 ) -> dict[str, float]:
     """
-    Walk every ``<VOUCHER>`` in the daybook; for vouchers that match the
-    expense‑Yes + liability‑No pattern, collect all liability/current‑asset
-    ledger names that appeared as ``ISDEEMEDPOSITIVE`` No in that voucher,
-    accumulating ``sum(abs(AMOUNT))`` per name across all matching vouchers.
+    Walk every ``<VOUCHER>`` in the daybook; collect liability/current‑asset
+    ledger names, accumulating ``sum(abs(AMOUNT))`` per name across all matching
+    vouchers. Two mirror‑image patterns are matched:
+
+    * **Forward booking** — an expense/fixed ledger on the Dr side
+      (``ISDEEMEDPOSITIVE`` Yes) + the party on the Cr side (No).
+    * **Reversal / debit‑note** — an expense/fixed ledger on the Cr side (No) +
+      the party on the Dr side (Yes).
 
     Absolute amounts are summed on purpose: a credit and its reversal should
-    make a name *more* visible for review, not net out to zero and vanish.
-    A name credited with a missing/unparseable AMOUNT still appears (with 0.0),
-    so ``set(result)`` is exactly the name set the original scan produced.
+    make a name *more* visible for review, not net out to zero and vanish. The
+    reversal pattern is counted too so a party whose only activity in this
+    period is a debit‑note (e.g. the forward expense was booked in a prior FY)
+    still accrues an amount, crosses the materiality floor, and gets a file —
+    instead of vanishing before analysis.
     """
     out: dict[str, float] = {}
     for _event, voucher in ET.iterparse(str(daybook_xml), events=("end",)):
         if voucher.tag != "VOUCHER":
             continue
 
-        expense_yes = False
-        liability_no_lines: list[tuple[str, float]] = []
+        expense_yes = False           # forward: expense on Dr side
+        expense_no = False            # reversal: expense on Cr side
+        liability_no_lines: list[tuple[str, float]] = []   # party on Cr (forward)
+        liability_yes_lines: list[tuple[str, float]] = []  # party on Dr (reversal)
 
         ledge = voucher.find("LEDGERENTRIES")
         if ledge is not None:
             for entry in ledge.findall("ENTRY"):
                 lname = (entry.findtext("LEDGERNAME") or "").strip()
                 deemed = (entry.findtext("ISDEEMEDPOSITIVE") or "").strip()
+                try:
+                    amount = abs(float((entry.findtext("AMOUNT") or "0").strip() or 0))
+                except ValueError:
+                    amount = 0.0
                 if lname in expense_or_fixed and deemed == "Yes":
                     expense_yes = True
+                if lname in expense_or_fixed and deemed == "No":
+                    expense_no = True
                 if lname in liability_or_current and deemed == "No":
-                    try:
-                        amount = abs(float((entry.findtext("AMOUNT") or "0").strip() or 0))
-                    except ValueError:
-                        amount = 0.0
                     liability_no_lines.append((lname, amount))
+                if lname in liability_or_current and deemed == "Yes":
+                    liability_yes_lines.append((lname, amount))
 
         if expense_yes and liability_no_lines:
             for lname, amount in liability_no_lines:
+                out[lname] = out.get(lname, 0.0) + amount
+        if expense_no and liability_yes_lines:
+            for lname, amount in liability_yes_lines:
                 out[lname] = out.get(lname, 0.0) + amount
 
         voucher.clear()
