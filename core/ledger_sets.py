@@ -114,6 +114,24 @@ def _resolve_expense_source(
     return sidecar
 
 
+def load_review_ledgers(ledgers_xml: Path) -> set[str]:
+    """Names of ledgers the classifier quarantined as ``NATURE == "Review"``.
+
+    These could not be confidently typed (e.g. a custom-named primary group with no
+    usable nature flags or balance signal) and are excluded from the expense set.
+    Exposed so a UI can surface them for manual income/expense classification.
+    """
+    review: set[str] = set()
+    for _event, elem in ET.iterparse(str(ledgers_xml), events=("end",)):
+        if elem.tag != "LEDGER":
+            continue
+        name = (elem.get("NAME") or "").strip()
+        if name and (elem.findtext("NATURE") or "").strip() == "Review":
+            review.add(name)
+        elem.clear()
+    return review
+
+
 def load_expense_and_liability_sets(
     ledgers_xml: Path,
     expense_override: Path | None = None,
@@ -150,6 +168,7 @@ def load_expense_and_liability_sets(
 
     expense_or_fixed: set[str] = set()
     liability_or_current: set[str] = set()
+    review: set[str] = set()
 
     for _event, elem in ET.iterparse(str(ledgers_xml), events=("end",)):
         if elem.tag != "LEDGER":
@@ -166,7 +185,21 @@ def load_expense_and_liability_sets(
             expense_or_fixed.add(name)
         if nature == "Liability" or rootprimary == "Current Assets":
             liability_or_current.add(name)
+        if nature == "Review":
+            review.add(name)
         elem.clear()
+
+    # Fail loud: the classifier could not confidently type these ledgers, so they are
+    # deliberately kept OUT of the expense set. Surface them so a quarantined-but-real
+    # expense is visible for review rather than silently dropped.
+    if review:
+        preview = ", ".join(sorted(review)[:10])
+        print(
+            f"[core.ledger_sets] {len(review)} ledger(s) quarantined as NATURE=Review "
+            f"(excluded from expenses, need manual classification): {preview}"
+            + (" ..." if len(review) > 10 else ""),
+            file=sys.stderr,
+        )
 
     if source is not None:
         expense_or_fixed = load_name_list(source)

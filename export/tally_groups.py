@@ -15,11 +15,18 @@ Running the file directly still writes ``tally_groups_final.xml`` in the CWD.
 """
 
 import requests
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 from xml.sax.saxutils import escape as _xml_escape
 import re
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from core.nature import classify_nature  # noqa: E402
 
 
 def _company_var(company):
@@ -118,46 +125,11 @@ def _build_groups_raw(root):
     return groups_raw
 
 
-# ── Step 2: Tally's fixed primary groups → nature mapping ─────────────
-# Tally has ~20 built-in "primary" groups that never change across any company.
-# Each maps to a financial nature (Asset/Liability/Income/Expense) and a
-# financial statement (Balance Sheet or P&L). User-created groups inherit
-# their nature from their root primary ancestor.
-PRIMARY_NATURE = {
-    "Capital Account":           ("Liability", "Balance Sheet"),
-    "Reserves & Surplus":        ("Liability", "Balance Sheet"),
-    "Loans (Liability)":         ("Liability", "Balance Sheet"),
-    "Current Liabilities":       ("Liability", "Balance Sheet"),
-    "Provisions":                ("Liability", "Balance Sheet"),
-    "Suspense A/c":              ("Liability", "Balance Sheet"),
-    "Branch / Divisions":        ("Liability", "Balance Sheet"),
-    "Expenses Payable":          ("Liability", "Balance Sheet"),
-    "Fixed Assets":              ("Asset",     "Balance Sheet"),
-    "Current Assets":            ("Asset",     "Balance Sheet"),
-    "Investments":               ("Asset",     "Balance Sheet"),
-    "Loans & Advances (Asset)":  ("Asset",     "Balance Sheet"),
-    "Misc. Expenses (ASSET)":    ("Asset",     "Balance Sheet"),
-    "Deposits (Asset)":          ("Asset",     "Balance Sheet"),
-    "Sales Accounts":            ("Income",    "P&L"),
-    "Direct Incomes":            ("Income",    "P&L"),
-    "Indirect Incomes":          ("Income",    "P&L"),
-    "Purchase Accounts":         ("Expense",   "P&L"),
-    "Direct Expenses":           ("Expense",   "P&L"),
-    "Indirect Expenses":         ("Expense",   "P&L"),
-    "Primary":                   ("Primary",   "Root"),
-}
-
-# ── Step 3: Walk parent chain to find root primary group ──────────────
-def get_root_primary(name, groups_dict, depth=0):
-    """Recursively walk up to find the Tally primary group ancestor."""
-    if depth > 20:  # prevent infinite loop
-        return name
-    if name in PRIMARY_NATURE:
-        return name
-    info = groups_dict.get(name)
-    if not info or not info["parent"]:
-        return name
-    return get_root_primary(info["parent"], groups_dict, depth + 1)
+# Group nature/root-primary classification lives in ``core.nature`` (shared with
+# ``tally_ledger_master.py`` so the two exports can never diverge). It layers the
+# reserved-name walk with Tally's own IsRevenue/IsDeemedPositive flags, so a
+# custom-named primary group (e.g. "Sales") is classified from its declared nature
+# instead of falling to "Primary"/Unknown.
 
 # ── Fetch from Tally + build output XML ───────────────────────────────
 def export_groups_to_path(
@@ -195,8 +167,9 @@ def export_groups_to_path(
     output_root = Element("TALLYGROUPS")
 
     for name, info in sorted(groups_raw.items()):
-        root_primary = get_root_primary(name, groups_raw)
-        nature, statement = PRIMARY_NATURE.get(root_primary, ("Unknown", "Unknown"))
+        # Classify from the group's OWN name so its reserved root (and, for custom
+        # primary groups, its declared IsRevenue/IsDeemedPositive nature) is used.
+        nature, statement, root_primary = classify_nature(name, groups_raw)
 
         g = SubElement(output_root, "GROUP")
 

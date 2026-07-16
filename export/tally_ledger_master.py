@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import copy
 import re
+import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
@@ -42,6 +43,12 @@ from xml.etree.ElementTree import Element, ElementTree, SubElement, indent
 from xml.sax.saxutils import escape as _xml_escape
 
 import requests
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from core.nature import classify_nature  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Ledger <FETCH> — wide list so Tally returns nested GST / registration / mailing
@@ -258,43 +265,14 @@ def _ledger_collection_envelope(fetch_spec: str, company: str | None = None) -> 
     </ENVELOPE>"""
 
 
-PRIMARY_NATURE: dict[str, tuple[str, str]] = {
-    "Capital Account": ("Liability", "Balance Sheet"),
-    "Reserves & Surplus": ("Liability", "Balance Sheet"),
-    "Loans (Liability)": ("Liability", "Balance Sheet"),
-    "Current Liabilities": ("Liability", "Balance Sheet"),
-    "Provisions": ("Liability", "Balance Sheet"),
-    "Suspense A/c": ("Liability", "Balance Sheet"),
-    "Branch / Divisions": ("Liability", "Balance Sheet"),
-    "Expenses Payable": ("Liability", "Balance Sheet"),
-    "Fixed Assets": ("Asset", "Balance Sheet"),
-    "Current Assets": ("Asset", "Balance Sheet"),
-    "Investments": ("Asset", "Balance Sheet"),
-    "Loans & Advances (Asset)": ("Asset", "Balance Sheet"),
-    "Misc. Expenses (ASSET)": ("Asset", "Balance Sheet"),
-    "Deposits (Asset)": ("Asset", "Balance Sheet"),
-    "Sales Accounts": ("Income", "P&L"),
-    "Direct Incomes": ("Income", "P&L"),
-    "Indirect Incomes": ("Income", "P&L"),
-    "Purchase Accounts": ("Expense", "P&L"),
-    "Direct Expenses": ("Expense", "P&L"),
-    "Indirect Expenses": ("Expense", "P&L"),
-    "Primary": ("Primary", "Root"),
-}
+def _load_groups_map(company: str | None = None) -> dict[str, dict]:
+    """Group name → ``{parent, isrevenue, isdeemedpositive}`` for the whole company.
 
-
-def _get_root_primary(name: str, gmap: dict[str, str], depth: int = 0) -> str:
-    if depth > 20:
-        return name
-    if name in PRIMARY_NATURE:
-        return name
-    parent = gmap.get(name, "")
-    if not parent:
-        return name
-    return _get_root_primary(parent, gmap, depth + 1)
-
-
-def _load_groups_map(company: str | None = None) -> dict[str, str]:
+    Fetches Tally's own nature flags (``IsRevenue`` / ``IsDeemedPositive``) alongside
+    the parent so the layered classifier can fall back to a group's declared nature
+    when its name is not one of the reserved primary groups (e.g. a custom "Sales"
+    primary group). Values are dicts so ``core.nature.get_root_primary`` can walk them.
+    """
     groot = ET.fromstring(
         post(
             f"""<ENVELOPE>
@@ -303,23 +281,27 @@ def _load_groups_map(company: str | None = None) -> dict[str, str]:
       <BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>{_company_var(company)}</STATICVARIABLES>
       <TDL><TDLMESSAGE>
         <COLLECTION NAME="List of Groups" ISMODIFY="No">
-          <TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue</FETCH>
+          <TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue, IsDeemedPositive</FETCH>
         </COLLECTION>
       </TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"""
         )
     )
-    groups_map: dict[str, str] = {}
+    groups_map: dict[str, dict] = {}
     for g in groot.findall(".//GROUP"):
         gn = norm_text(g.get("NAME"))
         if gn:
-            groups_map[gn] = norm_text(g.findtext("PARENT", ""))
+            groups_map[gn] = {
+                "parent": norm_text(g.findtext("PARENT", "")),
+                "isrevenue": norm_text(g.findtext("ISREVENUE", "")),
+                "isdeemedpositive": norm_text(g.findtext("ISDEEMEDPOSITIVE", "")),
+            }
     return groups_map
 
 
 def _export_flat(
     root: ET.Element,
     output_root: Element,
-    groups_map: dict[str, str],
+    groups_map: dict[str, dict],
 ) -> tuple[int, int]:
     """Previous flattened schema (backward compatible)."""
     count = skipped = 0
@@ -345,8 +327,13 @@ def _export_flat(
             continue
 
         parent = txt(led, "PARENT")
-        root_primary = _get_root_primary(parent, groups_map)
-        nature, stmt = PRIMARY_NATURE.get(root_primary, ("Unknown", "Unknown"))
+        nature, stmt, root_primary = classify_nature(
+            parent,
+            groups_map,
+            ledger_isrevenue=txt(led, "ISREVENUE"),
+            ledger_isdeemedpositive=txt(led, "ISDEEMEDPOSITIVE"),
+            closing_balance=txt(led, "CLOSINGBALANCE"),
+        )
 
         address_parts = [
             norm_text(a.text)
@@ -476,7 +463,7 @@ def export_ledgers_to_path(
     out_path = Path(out_path)
     fetch = fetch_spec or LEDGER_FETCH
 
-    groups_map: dict[str, str] = {}
+    groups_map: dict[str, dict] = {}
     if legacy_flat or enrich:
         groups_map = _load_groups_map(company)
 
@@ -507,8 +494,15 @@ def export_ledgers_to_path(
             node = copy.deepcopy(led)
             if enrich:
                 parent = norm_text(node.findtext("PARENT", ""))
-                rp = _get_root_primary(parent, groups_map)
-                nature, stmt = PRIMARY_NATURE.get(rp, ("Unknown", "Unknown"))
+                # Read the ledger's own flags + closing balance *before*
+                # strip_balance_tags() removes the balance below.
+                nature, stmt, rp = classify_nature(
+                    parent,
+                    groups_map,
+                    ledger_isrevenue=norm_text(node.findtext("ISREVENUE", "")),
+                    ledger_isdeemedpositive=norm_text(node.findtext("ISDEEMEDPOSITIVE", "")),
+                    closing_balance=norm_text(node.findtext("CLOSINGBALANCE", "")),
+                )
                 extra = [
                     Element("ROOTPRIMARY"),
                     Element("NATURE"),
