@@ -39,6 +39,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 from xml.etree.ElementTree import Element, ElementTree, SubElement, indent
+from xml.sax.saxutils import escape as _xml_escape
 
 import requests
 
@@ -119,6 +120,20 @@ def post(xml: str) -> str:
 
 def norm_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _company_var(company: str | None) -> str:
+    """An ``<SVCURRENTCOMPANY>`` line pinning the request to *company*, else ''.
+
+    Without this, a Tally instance with several companies loaded resolves the
+    request against whatever company is active — a Ledger/Group collection then
+    silently returns the wrong company's masters. Pinning scopes every request
+    to exactly one company. The name is XML-escaped (company names may contain
+    ``&``).
+    """
+    if not company or not company.strip():
+        return ""
+    return f"<SVCURRENTCOMPANY>{_xml_escape(company.strip())}</SVCURRENTCOMPANY>"
 
 
 def strip_type_attributes(elem: ET.Element) -> None:
@@ -216,7 +231,7 @@ def _insert_after_tag(parent: ET.Element, after_tag: str, new_children: list[ET.
         parent.insert(ix + 1 + j, el)
 
 
-def _ledger_collection_envelope(fetch_spec: str) -> str:
+def _ledger_collection_envelope(fetch_spec: str, company: str | None = None) -> str:
     return f"""<ENVELOPE>
       <HEADER>
         <VERSION>1</VERSION>
@@ -228,6 +243,7 @@ def _ledger_collection_envelope(fetch_spec: str) -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            {_company_var(company)}
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -278,13 +294,13 @@ def _get_root_primary(name: str, gmap: dict[str, str], depth: int = 0) -> str:
     return _get_root_primary(parent, gmap, depth + 1)
 
 
-def _load_groups_map() -> dict[str, str]:
+def _load_groups_map(company: str | None = None) -> dict[str, str]:
     groot = ET.fromstring(
         post(
-            """<ENVELOPE>
+            f"""<ENVELOPE>
       <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>
       <TYPE>Collection</TYPE><ID>List of Groups</ID></HEADER>
-      <BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+      <BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>{_company_var(company)}</STATICVARIABLES>
       <TDL><TDLMESSAGE>
         <COLLECTION NAME="List of Groups" ISMODIFY="No">
           <TYPE>Group</TYPE><FETCH>Name, Parent, IsRevenue</FETCH>
@@ -429,6 +445,7 @@ def export_ledgers_to_path(
     legacy_flat: bool = False,
     beautify: bool = True,
     fetch_spec: str | None = None,
+    company: str | None = None,
 ) -> tuple[int, int]:
     """Fetch all ledgers from Tally and write XML to *out_path*.
 
@@ -449,6 +466,9 @@ def export_ledgers_to_path(
     fetch_spec
         Override the default LEDGER_FETCH string if your Tally build rejects some
         method names.
+    company
+        Pin the request to this company via ``<SVCURRENTCOMPANY>``. When None, the
+        request runs against whatever company Tally has active (legacy behaviour).
 
     Returns
         (count_exported, count_skipped)
@@ -458,9 +478,9 @@ def export_ledgers_to_path(
 
     groups_map: dict[str, str] = {}
     if legacy_flat or enrich:
-        groups_map = _load_groups_map()
+        groups_map = _load_groups_map(company)
 
-    xml_request = _ledger_collection_envelope(fetch)
+    xml_request = _ledger_collection_envelope(fetch, company)
     raw = post(xml_request)
     root = ET.fromstring(raw)
 
@@ -559,6 +579,12 @@ def main() -> None:
         help="Emit the old flattened <LEDGER> schema instead of copying Tally's subtree.",
     )
     ap.add_argument(
+        "--company",
+        type=str,
+        default=None,
+        help="Pin the export to this Tally company (avoids mixing when several are open).",
+    )
+    ap.add_argument(
         "--beautify",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -573,6 +599,7 @@ def main() -> None:
         enrich=args.enrich,
         legacy_flat=args.legacy_flat,
         beautify=args.beautify,
+        company=args.company,
     )
 
 

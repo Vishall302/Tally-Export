@@ -18,7 +18,19 @@ import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+from xml.sax.saxutils import escape as _xml_escape
 import re
+
+
+def _company_var(company):
+    """An ``<SVCURRENTCOMPANY>`` line pinning the request to *company*, else ''.
+
+    Scopes the Group collection to one company so a multi-company Tally session
+    can't return another company's groups. The name is XML-escaped.
+    """
+    if not company or not company.strip():
+        return ""
+    return f"<SVCURRENTCOMPANY>{_xml_escape(company.strip())}</SVCURRENTCOMPANY>"
 
 # ── TDL XML request: fetch all Group attributes from Tally ────────────────────
 XML_REQUEST = """<ENVELOPE>
@@ -153,15 +165,26 @@ def export_groups_to_path(
     *,
     tally_url: str = "http://localhost:9000",
     timeout: int = 600,
+    company: str | None = None,
 ) -> int:
     """Fetch the Group hierarchy from Tally, classify each group, and write XML.
 
     Returns the number of groups exported. Safe to import — the live Tally HTTP
     request happens only when this function is called.
+
+    When *company* is given, the request is pinned to it via ``<SVCURRENTCOMPANY>``
+    so groups from other loaded companies are never returned.
     """
+    request = XML_REQUEST
+    cv = _company_var(company)
+    if cv:
+        request = request.replace(
+            "<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>",
+            f"<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>\n        {cv}",
+        )
     resp = requests.post(
         tally_url,
-        data=XML_REQUEST.encode("utf-8"),
+        data=request.encode("utf-8"),
         headers={"Content-Type": "text/xml"},
         timeout=timeout,
     )
@@ -220,4 +243,14 @@ def export_groups_to_path(
 
 
 if __name__ == "__main__":
-    export_groups_to_path("tally_groups_final.xml")
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Export group hierarchy from Tally.")
+    ap.add_argument("--out", default="tally_groups_final.xml", help="Output XML path")
+    ap.add_argument(
+        "--company",
+        default=None,
+        help="Pin the export to this Tally company (avoids mixing when several are open).",
+    )
+    a = ap.parse_args()
+    export_groups_to_path(a.out, company=a.company)

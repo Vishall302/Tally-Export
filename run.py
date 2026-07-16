@@ -57,6 +57,11 @@ def main() -> None:
         "--tds", action="store_true",
         help="Apply LLM expense blocklist before voucher scan (TDS mode)",
     )
+    p.add_argument(
+        "--company", default=None, metavar="NAME",
+        help="Pin the export to this Tally company. Omit to be prompted when "
+             "several companies are open (with --export).",
+    )
     args = p.parse_args()
 
     daybook_file = f"daybook_{args.start.replace('-', '')}_to_{args.end.replace('-', '')}.xml"
@@ -77,13 +82,22 @@ def main() -> None:
 
     # ── Phase 1: Export from live Tally (optional) ────────────────────────────
     if args.export:
+        # Pin all three exports to one company so a multi-company Tally session
+        # can't mix another company's vouchers into the daybook. Prompt if the
+        # operator didn't pass --company and several are open.
+        from export.tally_company import resolve_company_interactive
+        company = resolve_company_interactive(args.company)
+        company_args = ["--company", company] if company else []
+        if company:
+            print(f"\nExporting company: {company}")
+
         step("Export  [1/3]  group hierarchy",
-             [PY, "export/tally_groups.py"])
+             [PY, "export/tally_groups.py", *company_args])
         step("Export  [2/3]  ledger master",
-             [PY, "export/tally_ledger_master.py", "--out", str(LEDGERS)])
+             [PY, "export/tally_ledger_master.py", "--out", str(LEDGERS), *company_args])
         step("Export  [3/3]  daybook",
              [PY, "export/tally_daybook.py",
-              "--start", args.start, "--end", args.end, "--out", str(DAYBOOK)])
+              "--start", args.start, "--end", args.end, "--out", str(DAYBOOK), *company_args])
 
     # ── Phase 2: Ledger selection ─────────────────────────────────────────────
     if args.tds:

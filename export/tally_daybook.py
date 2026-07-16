@@ -17,8 +17,10 @@ import argparse
 import requests
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
+from xml.sax.saxutils import escape as _xml_escape
 import re
 from calendar import monthrange
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -103,12 +105,41 @@ def iter_month_chunks(start_dt, end_dt):
             m += 1
 
 
-def envelope_daybook(start_tally, end_tally):
+def _company_var(company):
+    """An ``<SVCURRENTCOMPANY>`` line pinning the request to *company*, else ''.
+
+    Without it, a Voucher collection on a Tally instance with several companies
+    loaded returns vouchers from *all* of them — polluting a client's audit with
+    another company's transactions. The name is XML-escaped (names may contain ``&``).
+    """
+    if not company or not company.strip():
+        return ""
+    return f"<SVCURRENTCOMPANY>{_xml_escape(company.strip())}</SVCURRENTCOMPANY>"
+
+
+def _company_guid(v):
+    """Company-GUID prefix of a voucher: its GUID/VCHKEY minus the trailing object id.
+
+    Tally object GUIDs look like ``<company-uuid>-<objectid>`` (e.g.
+    ``1b099cc1-d315-4231-ba62-509aea26d4fb-0000281c``). Every object in one company
+    shares the ``<company-uuid>`` prefix, so it identifies the owning company.
+    Returns '' when no GUID is available.
+    """
+    raw = txt(v, "GUID") or (v.get("VCHKEY") or "").strip()
+    if not raw or "-" not in raw:
+        return ""
+    return raw.rsplit("-", 1)[0]
+
+
+def envelope_daybook(start_tally, end_tally, company=None):
     """Build the TDL XML envelope that requests all daybook vouchers from Tally.
 
     The FETCH list includes every field needed for a complete voucher export:
     header fields, GST/tax details, status flags, ledger entries (with GST rate
     details, bill allocations, bank allocations, TDS), and inventory entries.
+
+    When *company* is given, the request is pinned to it via ``<SVCURRENTCOMPANY>``
+    so vouchers from other loaded companies are never returned.
     """
     return f"""<ENVELOPE>
   <HEADER>
@@ -121,6 +152,7 @@ def envelope_daybook(start_tally, end_tally):
     <DESC>
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        {_company_var(company)}
         <SVFROMDATE TYPE="Date">{start_tally}</SVFROMDATE>
         <SVTODATE TYPE="Date">{end_tally}</SVTODATE>
         <SVPERIODTYPE>Vouchers</SVPERIODTYPE>
@@ -175,7 +207,8 @@ def name_txt(el, tag):
 
 
 def export_daybook_to_path(
-    start: str, end: str, out_path: str | None = None, progress_cb=None
+    start: str, end: str, out_path: str | None = None, progress_cb=None,
+    company: str | None = None,
 ) -> Path:
     """Fetch the complete daybook from Tally and write a normalized XML file.
 
@@ -185,6 +218,8 @@ def export_daybook_to_path(
         out_path: Optional output file path. Defaults to daybook_DDMMYYYY_to_DDMMYYYY.xml.
         progress_cb: Optional callable ``(done_chunks, total_chunks, label)`` invoked
             after each monthly chunk is fetched, for UI progress reporting.
+        company: Pin the request to this Tally company via ``<SVCURRENTCOMPANY>``. When
+            None, runs against whatever company is active (legacy behaviour).
 
     Returns:
         Path to the written XML file.
@@ -221,7 +256,7 @@ def export_daybook_to_path(
         st = dt_to_tally(cs)
         et = dt_to_tally(ce)
         print(f"  Chunk {i}/{len(chunks)}: {st} … {et}")
-        raw = post(envelope_daybook(st, et))
+        raw = post(envelope_daybook(st, et, company))
         root_xml = ET.fromstring(raw)
         for v in root_xml.findall(".//VOUCHER"):
             if not v.get("VCHTYPE", "").strip():
@@ -241,6 +276,24 @@ def export_daybook_to_path(
             all_vouchers.append(v)
         if progress_cb is not None:
             progress_cb(i, len(chunks), f"{st} … {et}")
+
+    # ── Guard: drop vouchers belonging to a different company ──────────────
+    # Defense-in-depth behind SVCURRENTCOMPANY pinning. If a Tally build ignores
+    # the pin and returns vouchers from other loaded companies, keep only the
+    # majority (home) company GUID and report the count — so foreign transactions
+    # can never slip into the audit silently.
+    dropped_foreign_company = 0
+    prefixes = [p for p in (_company_guid(v) for v in all_vouchers) if p]
+    if prefixes:
+        home = Counter(prefixes).most_common(1)[0][0]
+        kept = [v for v in all_vouchers if _company_guid(v) in ("", home)]
+        dropped_foreign_company = len(all_vouchers) - len(kept)
+        all_vouchers = kept
+        if dropped_foreign_company:
+            print(
+                f"Dropped {dropped_foreign_company} voucher(s) from a different "
+                f"company (kept company GUID {home})"
+            )
 
     if dropped_out_of_range:
         print(
@@ -486,9 +539,17 @@ def main() -> None:
         "--out",
         help="Output XML file path (default: daybook_DDMMYYYY_to_DDMMYYYY.xml in cwd)",
     )
+    p.add_argument(
+        "--company",
+        default=None,
+        help="Pin the export to this Tally company (avoids mixing when several are open).",
+    )
     args = p.parse_args()
     if args.start_date and args.end_date:
-        export_daybook_to_path(args.start_date.strip(), args.end_date.strip(), args.out)
+        export_daybook_to_path(
+            args.start_date.strip(), args.end_date.strip(), args.out,
+            company=args.company,
+        )
         return
     if args.start_date or args.end_date:
         p.error("Provide both --start and --end, or neither for interactive mode.")
@@ -497,7 +558,7 @@ def main() -> None:
     print("=" * 55)
     start = input("Enter START date (DD-MM-YYYY): ").strip()
     end = input("Enter END date   (DD-MM-YYYY): ").strip()
-    export_daybook_to_path(start, end, args.out)
+    export_daybook_to_path(start, end, args.out, company=args.company)
 
 
 if __name__ == "__main__":
