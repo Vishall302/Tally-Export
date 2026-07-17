@@ -67,6 +67,7 @@ import argparse
 import io
 import json
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -531,7 +532,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return 0
 
-    # Convert each XML file independently; one output JSON per input stem.
+    # Convert each XML file independently; one output JSON per input stem. Clear any
+    # JSON from a previous run/company first so leftover per-party files (keyed by
+    # ledger name) can't linger and get re-analyzed. Guard against output_dir being
+    # the same as the XML input dir (would wipe the inputs mid-run).
+    if args.output_dir.exists() and args.output_dir.resolve() != args.vouchers_dir.resolve():
+        shutil.rmtree(args.output_dir, ignore_errors=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for xf in xml_files:
         data = convert_one_voucher_file(xf, ledger_index, normalized_ledger_index)

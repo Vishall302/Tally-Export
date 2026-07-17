@@ -35,6 +35,7 @@ array or one-name-per-line text file (typically the output of
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -205,6 +206,10 @@ def main() -> None:
     root_attrib = read_tally_daybook_root_attribs(args.daybook)
     voucher_strings, by_name = build_index_and_vouchers(args.daybook, targets)
 
+    # Clear slices from a previous run/company (files are keyed by ledger name, so
+    # non-overlapping parties would otherwise linger and be re-read downstream).
+    if args.out_dir.exists():
+        shutil.rmtree(args.out_dir, ignore_errors=True)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     stem_seq: defaultdict[str, int] = defaultdict(int)
 

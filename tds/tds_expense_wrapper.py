@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -76,6 +77,24 @@ from core.ledger_sets import load_expense_and_liability_sets  # noqa: E402
 from analyze.detect_cross_vouchers import collect_matching_liability_amounts  # noqa: E402
 
 
+def _scoped_cache_path(path: Path, company: str | None) -> Path:
+    """Company-scoped variant of a blocklist-cache path.
+
+    The cache keys inside these files are ledger names with NO company identity,
+    so sharing one file across companies lets Company A's BLOCK verdict silently
+    drop Company B's identically-named (but genuine) ledger from the audit.
+    Namespacing the FILE by company keeps the cost-saving reuse for re-runs of
+    the same company while making cross-company reuse impossible.
+    ``company=None`` (unpinned/legacy runs) keeps the original shared path.
+    """
+    if not company or not company.strip():
+        return path
+    slug = re.sub(r"[^a-z0-9]+", "_", company.strip().lower()).strip("_")[:60]
+    if not slug:
+        return path
+    return path.with_name(f"{path.stem}.{slug}{path.suffix}")
+
+
 def run_tds_selection(
     *,
     ledgers: Path,
@@ -86,6 +105,7 @@ def run_tds_selection(
     report: Path,
     filtered_expense: Path,
     cache: Path,
+    company: str | None = None,
     model: str = "claude-haiku-4-5",
     batch_size: int = 25,
     max_tokens: int = 32000,
@@ -134,6 +154,11 @@ def run_tds_selection(
         party_report = output.parent / "party_blocklist_report.json"
     if party_cache is None:
         party_cache = output.parent / "party_blocklist_cache.json"
+
+    # Scope both LLM-verdict caches to the company being audited (see
+    # _scoped_cache_path) — cache keys are ledger names with no company identity.
+    cache = _scoped_cache_path(cache, company)
+    party_cache = _scoped_cache_path(party_cache, company)
 
     # Validate inputs.
     if not ledgers.is_file():
@@ -443,6 +468,11 @@ def main() -> None:
              "party filter): keep its names conservatively and continue. This is "
              "the mode the webapp runs in.",
     )
+    p.add_argument(
+        "--company", default=None,
+        help="Company being audited — scopes the blocklist caches per company so "
+             "one company's BLOCK verdicts never apply to another's ledgers.",
+    )
     args = p.parse_args()
 
     try:
@@ -455,6 +485,7 @@ def main() -> None:
             report=args.report,
             filtered_expense=args.filtered_expense,
             cache=args.cache,
+            company=args.company,
             model=args.model,
             batch_size=args.batch_size,
             max_tokens=args.max_tokens,

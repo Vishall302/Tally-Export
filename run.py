@@ -81,6 +81,7 @@ def main() -> None:
     PY = sys.executable
 
     # ── Phase 1: Export from live Tally (optional) ────────────────────────────
+    company = args.company  # may be refined interactively below (--export)
     if args.export:
         # Pin all three exports to one company so a multi-company Tally session
         # can't mix another company's vouchers into the daybook. Prompt if the
@@ -114,6 +115,9 @@ def main() -> None:
             "--party-report",     str(PARTY_RPT),
             "--party-cache",      str(PARTY_CACHE),
         ]
+        if company:
+            # Scope the blocklist caches per company (see tds_expense_wrapper).
+            tds_cmd += ["--company", company]
         step("TDS     [1/3]  blocklist filter + voucher scan", tds_cmd)
     else:
         with open(FINAL_LIST, "w") as out_f:
