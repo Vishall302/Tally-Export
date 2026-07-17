@@ -174,6 +174,74 @@ def collect_matching_liability_names(
     )
 
 
+def collect_orphan_expense_amounts(
+    daybook_xml: Path,
+    expense_or_fixed: set[str],
+    genuine_party_names: set[str],
+    settlement_names: set[str],
+) -> dict[str, float]:
+    """Walk every ``<VOUCHER>`` and collect **expense-ledger** names from
+    *party-less direct-expense* vouchers — the mirror image of
+    :func:`collect_matching_liability_amounts`.
+
+    A voucher is an **orphan** when an accountant debits the expense ledger
+    directly and settles it straight out of bank/cash, without ever routing it
+    through a party/creditor ledger (the vendor, if named at all, lives only in
+    the narration). Such a voucher matches **no** party name, so today it is
+    silently dropped before analysis. This function surfaces it keyed by the
+    expense ledger so a per-expense slice can be built for review.
+
+    A voucher qualifies when **all** hold:
+
+    * an ``expense_or_fixed`` ledger appears on the **Dr** side
+      (``ISDEEMEDPOSITIVE`` Yes) — the direct expense booking;
+    * at least one ``settlement_names`` ledger (bank/cash) appears on the **Cr**
+      side (No) — a genuine outward payment, not a reclassification journal;
+    * **no** ``genuine_party_names`` ledger appears anywhere in the voucher — if
+      a real party line exists, the normal party path already handles it.
+
+    ``genuine_party_names`` should be the liability/current-asset set with the
+    group-excluded ledgers (bank/cash/duties/branch) already removed, so a bank
+    line — which some exports classify under Current Assets — is never mistaken
+    for a party. ``settlement_names`` is the bank/cash ledger set. Absolute
+    amounts are summed per expense name, mirroring the party scan.
+
+    Returns ``dict[str, float]`` = ``{expense_ledger_name: sum(abs(AMOUNT))}``.
+    """
+    out: dict[str, float] = {}
+    for _event, voucher in ET.iterparse(str(daybook_xml), events=("end",)):
+        if voucher.tag != "VOUCHER":
+            continue
+
+        expense_dr_lines: list[tuple[str, float]] = []  # expense on Dr (direct booking)
+        has_settlement_cr = False                        # bank/cash on Cr (outward payment)
+        has_genuine_party = False                        # a real party line disqualifies
+
+        ledge = voucher.find("LEDGERENTRIES")
+        if ledge is not None:
+            for entry in ledge.findall("ENTRY"):
+                lname = (entry.findtext("LEDGERNAME") or "").strip()
+                deemed = (entry.findtext("ISDEEMEDPOSITIVE") or "").strip()
+                try:
+                    amount = abs(float((entry.findtext("AMOUNT") or "0").strip() or 0))
+                except ValueError:
+                    amount = 0.0
+                if lname in expense_or_fixed and deemed == "Yes":
+                    expense_dr_lines.append((lname, amount))
+                if lname in settlement_names and deemed == "No":
+                    has_settlement_cr = True
+                if lname in genuine_party_names:
+                    has_genuine_party = True
+
+        if expense_dr_lines and has_settlement_cr and not has_genuine_party:
+            for lname, amount in expense_dr_lines:
+                out[lname] = out.get(lname, 0.0) + amount
+
+        voucher.clear()
+
+    return out
+
+
 def main() -> None:
     base = Path(__file__).resolve().parent
     p = argparse.ArgumentParser(description=__doc__)
