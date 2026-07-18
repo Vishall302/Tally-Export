@@ -74,15 +74,7 @@ from core.groups import (  # noqa: E402
     parent_names_from_roots,
 )
 from core.ledger_sets import load_expense_and_liability_sets  # noqa: E402
-from analyze.detect_cross_vouchers import (  # noqa: E402
-    collect_matching_liability_amounts,
-    collect_orphan_expense_amounts,
-)
-
-# Bank/cash roots — the legit Cr counter-side of a party-less direct expense
-# payment. A subset of DEFAULT_ROOT_GROUPS (no Duties/Branch) so only genuine
-# settlement ledgers count as the outward-payment side of an orphan voucher.
-_SETTLEMENT_ROOT_GROUPS = ("Cash-in-Hand", "Bank Accounts")
+from analyze.detect_cross_vouchers import collect_matching_liability_amounts  # noqa: E402
 
 
 def _scoped_cache_path(path: Path, company: str | None) -> Path:
@@ -113,7 +105,6 @@ def run_tds_selection(
     report: Path,
     filtered_expense: Path,
     cache: Path,
-    orphan_output: Path | None = None,
     company: str | None = None,
     model: str = "claude-haiku-4-5",
     batch_size: int = 25,
@@ -131,22 +122,15 @@ def run_tds_selection(
     no_party_filter: bool = False,
     party_dry_run: bool = False,
     progress_cb=None,
-) -> tuple[list[str], list[str]]:
+) -> list[str]:
     """Run the TDS ledger selection (LLM expense blocklist + voucher scan +
     group exclusion + materiality floor + LLM party blocklist) and write the
     sorted result to *output*.
 
-    Returns ``(party_names, orphan_expense_names)`` — the sorted final party
-    ledger names (written to *output*, the single source of truth) and, in
-    parallel, the sorted expense-ledger names of *party-less direct-expense*
-    vouchers (written to *orphan_output* if given). Orphan names deliberately
-    **bypass Stage 5** (the LLM party blocklist would delete every expense
-    ledger, since an expense ledger is by definition not a party) and get only
-    the Stage-4 group exclusion + their own materiality floor. This is the
-    importable core that both ``main()`` (CLI) and the webapp pipeline call.
-    ``progress_cb`` — if given — is invoked as ``progress_cb(stage, detail)`` at
-    each stage. Requires ``ANTHROPIC_API_KEY`` in the environment (LLM filter is
-    always on).
+    Returns the sorted list of final ledger names. This is the importable core
+    that both ``main()`` (CLI) and the webapp pipeline call. ``progress_cb`` — if
+    given — is invoked as ``progress_cb(stage: str, detail: str)`` at each stage.
+    Requires ``ANTHROPIC_API_KEY`` in the environment (LLM filter is always on).
 
     False-positive controls (Stages 4.5 and 5):
       - ``min_party_amount`` — drop parties whose TOTAL ``abs(AMOUNT)`` credited
@@ -252,7 +236,6 @@ def run_tds_selection(
 
     # ----- Stage 4: group-tree exclusion (same as final_list.py) -----
     excluded: set[str] = set()
-    settlement_names: set[str] = set()
     if no_group_exclusion:
         print("\nStage 4: SKIPPED (no_group_exclusion).", file=sys.stderr)
         final_set = matching
@@ -266,37 +249,12 @@ def run_tds_selection(
             str(groups_xml), list(DEFAULT_ROOT_GROUPS)
         )
         excluded = set(ledgers_with_parent_in(str(ledgers), parent_names))
-        # Bank/cash subset — the settlement side of an orphan direct-expense payment.
-        settlement_parents, _ = parent_names_from_roots(
-            str(groups_xml), list(_SETTLEMENT_ROOT_GROUPS)
-        )
-        settlement_names = set(ledgers_with_parent_in(str(ledgers), settlement_parents))
         print(
             f"  group-excluded ledger names: {len(excluded)}\n"
             f"  intersection (removed)     : {len(matching & excluded)}",
             file=sys.stderr,
         )
         final_set = matching - excluded
-
-    # ----- Stage 3.5 (orphans): party-less direct-expense vouchers -----
-    # Scan again for expense ledgers debited straight to bank/cash with no party
-    # line. These carry real TDS exposure but match no party, so the party path
-    # above drops them entirely. Carried in a PARALLEL set that never enters
-    # Stage 5 (see below). genuine_party = liability/current minus group-excluded,
-    # so a bank line classified under Current Assets is not mistaken for a party.
-    orphan_amounts: dict[str, float] = {}
-    orphan_set: set[str] = set()
-    if not no_group_exclusion and settlement_names:
-        _emit("orphan_scan", "Scanning party-less direct-expense vouchers")
-        print("\nStage 3.5: scanning party-less direct-expense (orphan) vouchers...",
-              file=sys.stderr)
-        genuine_party_names = liability_or_current - excluded
-        orphan_amounts = collect_orphan_expense_amounts(
-            daybook, filtered_expense_set, genuine_party_names, settlement_names
-        )
-        # Same group exclusion as parties (a mis-grouped expense can't leak through).
-        orphan_set = set(orphan_amounts) - excluded
-        print(f"  orphan expense-ledger names: {len(orphan_set)}", file=sys.stderr)
 
     # ----- Stage 4.5: materiality floor (rounding-entry parties) -----
     party_audit: list[dict] = []
@@ -332,24 +290,7 @@ def run_tds_selection(
     else:
         print("\nStage 4.5: SKIPPED (min_party_amount=0).", file=sys.stderr)
 
-    # Same floor for orphans, against their own (expense-keyed) amounts.
-    if orphan_set and min_party_amount > 0:
-        orphan_floored = {
-            n for n in orphan_set if orphan_amounts.get(n, 0.0) < min_party_amount
-        }
-        if orphan_floored:
-            print(
-                f"  orphan floor ₹{min_party_amount:g} — dropping "
-                f"{len(orphan_floored)} orphan name(s).",
-                file=sys.stderr,
-            )
-            orphan_set = orphan_set - orphan_floored
-
     # ----- Stage 5: LLM party blocklist (statutory/provision/prepaid/suspense) -----
-    # NOTE: orphan_set is intentionally NOT routed through Stage 5. The party
-    # blocklist is tuned to remove non-party ledgers; an expense ledger is by
-    # definition not a party, so it would be stripped here. Orphans carry only
-    # the Stage-4 group exclusion + the floor above.
     if no_party_filter:
         print("\nStage 5: SKIPPED (no_party_filter).", file=sys.stderr)
     elif final_set:
@@ -402,9 +343,7 @@ def run_tds_selection(
     print(f"  Party audit report: {party_report}", file=sys.stderr)
 
     sorted_names = sorted(final_set)
-    orphan_names = sorted(orphan_set)
-    print(f"\nFinal ledger names: {len(sorted_names)} party, "
-          f"{len(orphan_names)} orphan expense", file=sys.stderr)
+    print(f"\nFinal ledger names: {len(sorted_names)}", file=sys.stderr)
 
     # ----- Write final output -----
     with output.open("w", encoding="utf-8", newline="\n") as f:
@@ -416,21 +355,8 @@ def run_tds_selection(
                 f.write(n + "\n")
     print(f"\nFinal output written to {output}", file=sys.stderr)
 
-    # Orphan expense names travel in a parallel sidecar so final.txt stays the
-    # single source of truth for PARTY selection. Downstream split routes these
-    # to per-expense slices with the exactly-one-home guard.
-    if orphan_output is not None:
-        with orphan_output.open("w", encoding="utf-8", newline="\n") as f:
-            if as_json:
-                json.dump(orphan_names, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            else:
-                for n in orphan_names:
-                    f.write(n + "\n")
-        print(f"Orphan expense list written to {orphan_output}", file=sys.stderr)
-
     _emit("selection_done", f"{len(sorted_names)} ledgers selected")
-    return sorted_names, orphan_names
+    return sorted_names
 
 
 def main() -> None:
@@ -459,11 +385,6 @@ def main() -> None:
     p.add_argument(
         "--output", type=Path, default=base / "test_filtered.txt",
         help="Final voucher-scan output (sorted liability/current-asset names).",
-    )
-    p.add_argument(
-        "--orphan-output", type=Path, default=None,
-        help="Sidecar list of party-less direct-expense (orphan) expense-ledger "
-             "names. Parallel to --output; never touched by the party blocklist.",
     )
     p.add_argument(
         "--report", type=Path, default=base / "expense_blocklist_report.json",
@@ -563,7 +484,6 @@ def main() -> None:
             groups_xml=args.groups_xml,
             config=args.config,
             output=args.output,
-            orphan_output=args.orphan_output,
             report=args.report,
             filtered_expense=args.filtered_expense,
             cache=args.cache,

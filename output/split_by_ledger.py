@@ -58,21 +58,6 @@ def read_tally_daybook_root_attribs(daybook_xml: Path) -> dict[str, str]:
     raise ValueError(f"No TALLYDAYBOOK root in {daybook_xml}")
 
 
-# Orphan (party-less direct-expense) slices are written with this stem prefix so
-# they can never collide with a party slice's sanitized stem, and are marked with
-# root attributes that survive to_json (kept as "@ATTR" keys in the JSON). The
-# analysis layer reads these to route the rows into the party-attribution bucket.
-ORPHAN_STEM_PREFIX = "__ORPHAN__"
-ORPHAN_MARKER_ATTR = "ORPHANEXPENSE"   # "1" on the TALLYDAYBOOK root
-ORPHAN_LEDGER_ATTR = "ORPHANLEDGER"    # the expense ledger display name
-
-
-def orphan_root_attrib(root_attrib: dict[str, str], expense_name: str) -> dict[str, str]:
-    """Root attributes for an orphan slice: the daybook attribs plus the orphan
-    marker + expense-ledger name, so the analysis layer can flag these rows."""
-    return {**root_attrib, ORPHAN_MARKER_ATTR: "1", ORPHAN_LEDGER_ATTR: expense_name}
-
-
 def ledger_names_in_voucher(voucher: ET.Element) -> set[str]:
     names: set[str] = set()
     party = (voucher.findtext("PARTYLEDGERNAME") or "").strip()
@@ -109,19 +94,7 @@ def write_daybook_subset(
 def build_index_and_vouchers(
     daybook_xml: Path,
     targets: set[str],
-    orphan_targets: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[str], dict[str, list[int]]]:
-    """Index every voucher and map each target ledger name to the vouchers it
-    appears in.
-
-    ``targets`` are the party ledger names (final.txt). ``orphan_targets`` are
-    the party-less direct-expense ledger names — a voucher is routed to an
-    orphan expense slice **only when it contains no party target**
-    (``not (names & targets)``). A normal ``Dr Expense / Cr Creditor`` voucher
-    carries the creditor in ``targets``, so this guard excludes it from the
-    expense slice automatically — guaranteeing every voucher has exactly one
-    home and is never double-counted.
-    """
     voucher_strings: list[str] = []
     by_name: dict[str, list[int]] = defaultdict(list)
 
@@ -135,11 +108,6 @@ def build_index_and_vouchers(
         for n in names:
             if n in targets:
                 by_name[n].append(idx)
-        # Orphan routing: only when this voucher has no surviving party target.
-        if orphan_targets and not (names & targets):
-            for n in names:
-                if n in orphan_targets:
-                    by_name[n].append(idx)
 
         voucher.clear()
 
@@ -181,14 +149,6 @@ def main() -> None:
              "e.g. the pipeline's final.txt). When given, slice exactly these names "
              "and skip re-derivation — the ONLY mode that honours the materiality "
              "floor + party blocklist. Pipelines should always pass this.",
-    )
-    p.add_argument(
-        "--orphan-names",
-        type=Path,
-        default=None,
-        help="Optional list of party-less direct-expense (orphan) ledger names "
-             "(JSON array or one-name-per-line, e.g. the pipeline's "
-             "orphan_expense.txt). Written as marked __ORPHAN__ slices.",
     )
     p.add_argument(
         "--filtered-expense",
@@ -243,14 +203,8 @@ def main() -> None:
         sys.exit(0)
 
     targets = set(names)
-    orphan_names: list[str] = []
-    if args.orphan_names is not None and args.orphan_names.is_file():
-        orphan_names = sorted(load_name_list(args.orphan_names))
-    orphan_targets = set(orphan_names)
     root_attrib = read_tally_daybook_root_attribs(args.daybook)
-    voucher_strings, by_name = build_index_and_vouchers(
-        args.daybook, targets, orphan_targets
-    )
+    voucher_strings, by_name = build_index_and_vouchers(args.daybook, targets)
 
     # Clear slices from a previous run/company (files are keyed by ledger name, so
     # non-overlapping parties would otherwise linger and be re-read downstream).
@@ -268,19 +222,6 @@ def main() -> None:
         n = stem_seq[stem]
         out_name = f"{stem}.xml" if n == 1 else f"{stem}_{n}.xml"
         write_daybook_subset(args.out_dir / out_name, root_attrib, subset)
-        written += 1
-
-    # Orphan slices: distinct __ORPHAN__ stem + marker attributes.
-    for expense_name in orphan_names:
-        idxs = by_name.get(expense_name, [])
-        subset = [voucher_strings[i] for i in idxs] if idxs else []
-        stem = ORPHAN_STEM_PREFIX + sanitize_filename(expense_name)
-        stem_seq[stem] += 1
-        n = stem_seq[stem]
-        out_name = f"{stem}.xml" if n == 1 else f"{stem}_{n}.xml"
-        write_daybook_subset(
-            args.out_dir / out_name, orphan_root_attrib(root_attrib, expense_name), subset
-        )
         written += 1
 
     print(
