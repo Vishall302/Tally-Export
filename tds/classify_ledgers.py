@@ -154,11 +154,16 @@ def _build_closures(groups_xml: Path | None) -> dict[str, set[str]]:
 def classify_one(
     fields: dict[str, Any],
     closures: dict[str, set[str]],
+    party_names: frozenset[str] = frozenset(),
 ) -> str:
     """Classify a single ledger from its master fields + reserved-group closures.
 
     ``fields`` is a flattened ledger-master dict (from
     ``to_json.extract_ledger_master_fields``): PARENT, ROOTPRIMARY, NATURE, TAXTYPE.
+    ``party_names`` is the set of already-``_norm``-alised NAMEs of ledgers the
+    audit treats as parties in their own right (they have their own voucher file);
+    such a ledger is a real counter-party and must never fall through to a silent
+    non-payee ``asset``.
     Returns one of the class constants; REVIEW when no confident signal exists.
     """
     parent = (fields.get("PARENT") or "").strip()
@@ -211,10 +216,27 @@ def classify_one(
         return PARTY
 
     # ── Tier 2: NATURE (already resolved by core.nature at export time) ───────
+    # P&L first: a genuine payee is never a P&L line, and the audit list can carry
+    # a stray expense/income ledger — it must NOT be turned into a payee.
     if nature == "expense":
         return EXPENSE
     if nature == "income":
         return INCOME
+
+    # A ledger the audit analyses as a party in its own right (it has its own
+    # voucher file → its NAME is in party_names) is a real counter-party — so when
+    # the SAME ledger appears as a credit inside another party's voucher it is a
+    # genuine second payee, never a silent asset. This rescues trade parties booked
+    # under a custom asset/receivable group (e.g. "TRADE A R") with no PAN/GSTIN,
+    # which the closures and tax/PAN rungs above cannot catch. Structural
+    # (is-it-a-party), not name-based; placed AFTER the P&L check and BEFORE the
+    # asset/review fall-through, so it only ever rescues a balance-sheet party and
+    # can never touch a real prepaid/deposit or a P&L line. (bank/tax ledgers were
+    # already resolved in Tier 1, so a provision or bank ledger that leaked into
+    # the audit list stays statutory/bank, never a payee.)
+    if name_norm and name_norm in party_names:
+        return PARTY
+
     if nature == "review":
         return REVIEW
     if nature == "asset":
@@ -231,16 +253,23 @@ def classify_one(
 def classify_ledgers(
     ledger_index: dict[str, dict[str, Any]],
     groups_xml: Path | None = None,
+    party_names: frozenset[str] | set[str] | None = None,
 ) -> dict[str, str]:
     """Deterministically classify every ledger in the master index.
+
+    ``party_names`` (optional) is the set of raw ledger NAMEs the audit analyses
+    as parties in their own right; normalised once here and used to keep a proven
+    party from being classified as a silent non-payee asset. Omitting it leaves
+    behavior byte-for-byte unchanged.
 
     Returns ``{ledger_name: class}``. No LLM, no network — Tier 1/2 only; the
     residual is ``REVIEW``. Callers that want the optional LLM tier run
     ``refine_review_with_llm`` over the review-class names afterwards.
     """
     closures = _build_closures(groups_xml)
+    party_norm = frozenset(_norm(n) for n in (party_names or ()))
     return {
-        name: classify_one(fields, closures)
+        name: classify_one(fields, closures, party_norm)
         for name, fields in ledger_index.items()
     }
 

@@ -570,6 +570,31 @@ def main(argv: list[str] | None = None) -> int:
     normalized_ledger_index = _build_normalized_ledger_index(ledger_index)
     print(f"Indexed {len(ledger_index)} ledgers.", file=sys.stderr)
 
+    xml_files = sorted(args.vouchers_dir.glob("*.xml"))
+    if not xml_files:
+        print(f"No XML files in {args.vouchers_dir}", file=sys.stderr)
+        return 1
+
+    # Pre-compute missing NAME matches to surface quality issues before writing
+    # outputs. The resolved masters double as the "audited party" set: a ledger
+    # with its own voucher file is a party in its own right, so the classifier
+    # must not later demote it to a silent non-payee asset when it appears as a
+    # credit inside another party's voucher.
+    # (Limitation: a party whose sanitized filename collided with another and was
+    # written as "<stem>_2.xml" won't resolve here and is omitted from the party
+    # set — it then classifies purely on its group, i.e. the pre-safeguard
+    # behaviour. No regression, just no rescue; the collision case is rare.)
+    missing_masters = 0
+    party_names: set[str] = set()
+    for xf in xml_files:
+        master = _lookup_ledger_master(xf.stem, ledger_index, normalized_ledger_index)
+        if master is None:
+            missing_masters += 1
+        else:
+            nm = master.get("NAME")
+            if nm:
+                party_names.add(nm)
+
     # Authoritative per-ledger class (tds/gst/party/statutory/...) from the Tally
     # group structure — computed once over the full master, so a non-owner credit
     # line still resolves. The group-based tiers are deterministic; whatever they
@@ -579,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from tds.classify_ledgers import classify_ledgers, classify_review_with_llm
         from collections import Counter as _Counter
-        ledger_classes = classify_ledgers(ledger_index, args.groups)
+        ledger_classes = classify_ledgers(ledger_index, args.groups, party_names)
         print(f"Classified {len(ledger_classes)} ledgers (deterministic): "
               f"{dict(_Counter(ledger_classes.values()))}", file=sys.stderr)
         # LLM tier over the deterministic residual (unless disabled / no API). Any
@@ -598,17 +623,6 @@ def main(argv: list[str] | None = None) -> int:
             "deterministic class (or none) and the analyzer falls back to name heuristics.",
             file=sys.stderr,
         )
-
-    xml_files = sorted(args.vouchers_dir.glob("*.xml"))
-    if not xml_files:
-        print(f"No XML files in {args.vouchers_dir}", file=sys.stderr)
-        return 1
-
-    # Pre-compute missing NAME matches to surface quality issues before writing outputs.
-    missing_masters = 0
-    for xf in xml_files:
-        if _lookup_ledger_master(xf.stem, ledger_index, normalized_ledger_index) is None:
-            missing_masters += 1
 
     print(f"Found {len(xml_files)} voucher XML files.", file=sys.stderr)
     if missing_masters:
