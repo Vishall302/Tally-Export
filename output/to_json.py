@@ -411,20 +411,47 @@ def daybook_xml_to_json_structure(daybook_root: ET.Element) -> dict[str, Any]:
     return _element_to_obj(daybook_root)
 
 
+def _lookup_class(
+    ledger_name: str,
+    ledger_classes: dict[str, str] | None,
+    normalized_ledger_index: dict[str, dict[str, Any]],
+) -> str:
+    """Authoritative class for a ledger name, tolerating punctuation/case variants.
+
+    ``ledger_classes`` is keyed by the master NAME; entry LEDGERNAMEs can differ by
+    punctuation, so fall back to the normalized-index master NAME when the exact
+    key misses (mirrors ``_lookup_ledger_master``).
+    """
+    if not ledger_classes:
+        return ""
+    hit = ledger_classes.get(ledger_name)
+    if hit:
+        return hit
+    master = normalized_ledger_index.get(_normalize_ledger_key(ledger_name))
+    if master is not None:
+        return ledger_classes.get(master.get("NAME", ""), "")
+    return ""
+
+
 def _inject_ledger_type_in_entries(
     node: Any,
     ledger_index: dict[str, dict[str, Any]],
     normalized_ledger_index: dict[str, dict[str, Any]],
+    ledger_classes: dict[str, str] | None = None,
 ) -> None:
     """
-    Walk the daybook JSON tree and add Ledger_type to ledger-entry objects.
-    Any object with LEDGERNAME is treated as an entry candidate.
+    Walk the daybook JSON tree and add Ledger_type (nature) and Ledger_class
+    (authoritative tds/gst/party/... class) to ledger-entry objects. Any object
+    with LEDGERNAME is treated as an entry candidate. The class is looked up in the
+    FULL master index, so a non-owner credit line (e.g. a TDS ledger appearing only
+    inside another party's voucher) still gets its class.
     """
     if isinstance(node, dict):
         ledger_name = node.get("LEDGERNAME")
         if isinstance(ledger_name, str) and ledger_name.strip():
+            name = ledger_name.strip()
             master = _lookup_ledger_master(
-                ledger_name.strip(), ledger_index, normalized_ledger_index
+                name, ledger_index, normalized_ledger_index
             )
             nature = ""
             if master is not None:
@@ -432,19 +459,27 @@ def _inject_ledger_type_in_entries(
                 if isinstance(raw_nature, str):
                     nature = raw_nature
             node["Ledger_type"] = nature
+            cls = _lookup_class(name, ledger_classes, normalized_ledger_index)
+            if cls:
+                node["Ledger_class"] = cls
         for value in node.values():
-            _inject_ledger_type_in_entries(value, ledger_index, normalized_ledger_index)
+            _inject_ledger_type_in_entries(
+                value, ledger_index, normalized_ledger_index, ledger_classes
+            )
         return
 
     if isinstance(node, list):
         for item in node:
-            _inject_ledger_type_in_entries(item, ledger_index, normalized_ledger_index)
+            _inject_ledger_type_in_entries(
+                item, ledger_index, normalized_ledger_index, ledger_classes
+            )
 
 
 def convert_one_voucher_file(
     voucher_xml: Path,
     ledger_index: dict[str, dict[str, Any]],
     normalized_ledger_index: dict[str, dict[str, Any]],
+    ledger_classes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     # File stem is expected to match <LEDGER NAME="..."> in master XML.
     stem = voucher_xml.stem
@@ -459,7 +494,9 @@ def convert_one_voucher_file(
     tree = ET.parse(voucher_xml)
     root = tree.getroot()
     daybook_json = daybook_xml_to_json_structure(root)
-    _inject_ledger_type_in_entries(daybook_json, ledger_index, normalized_ledger_index)
+    _inject_ledger_type_in_entries(
+        daybook_json, ledger_index, normalized_ledger_index, ledger_classes
+    )
 
     return {
         "ledger_master": ledger_master,
@@ -490,6 +527,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Folder to write .json files (created if missing)",
     )
     p.add_argument(
+        "--groups",
+        type=Path,
+        default=None,
+        help="Path to tally_groups_final.xml — enables authoritative per-entry "
+        "Ledger_class (tds/gst/party/...) from the Tally group structure. "
+        "Optional: without it, classification falls back to nature/keywords only.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Load master and report counts only; do not write JSON",
@@ -509,6 +554,23 @@ def main(argv: list[str] | None = None) -> int:
     # Required for tolerant lookups when voucher filename stem differs by punctuation/casing.
     normalized_ledger_index = _build_normalized_ledger_index(ledger_index)
     print(f"Indexed {len(ledger_index)} ledgers.", file=sys.stderr)
+
+    # Authoritative per-ledger class (tds/gst/party/statutory/...) from the Tally
+    # group structure — computed once over the full master, so a non-owner credit
+    # line still resolves. Deterministic (no LLM); the residual is "review".
+    ledger_classes: dict[str, str] = {}
+    try:
+        from tds.classify_ledgers import classify_ledgers
+        ledger_classes = classify_ledgers(ledger_index, args.groups)
+        from collections import Counter as _Counter
+        _dist = dict(_Counter(ledger_classes.values()))
+        print(f"Classified {len(ledger_classes)} ledgers: {_dist}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — classification is best-effort
+        print(
+            f"Warning: ledger classification failed ({exc}); entries will carry no "
+            "Ledger_class and the analyzer falls back to name heuristics.",
+            file=sys.stderr,
+        )
 
     xml_files = sorted(args.vouchers_dir.glob("*.xml"))
     if not xml_files:
@@ -539,8 +601,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_dir.exists() and args.output_dir.resolve() != args.vouchers_dir.resolve():
         shutil.rmtree(args.output_dir, ignore_errors=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    # Company-wide class map sidecar (audit + the Review & Resolve classifier tab).
+    # Written once, not embedded in every party file.
+    if ledger_classes:
+        with (args.output_dir / "_ledger_classes.json").open(
+            "w", encoding="utf-8"
+        ) as f:
+            json.dump(ledger_classes, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
     for xf in xml_files:
-        data = convert_one_voucher_file(xf, ledger_index, normalized_ledger_index)
+        data = convert_one_voucher_file(
+            xf, ledger_index, normalized_ledger_index, ledger_classes
+        )
         out_path = args.output_dir / f"{xf.stem}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w", encoding="utf-8") as f:
