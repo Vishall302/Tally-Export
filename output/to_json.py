@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import shutil
 import sys
@@ -535,6 +536,20 @@ def main(argv: list[str] | None = None) -> int:
         "Optional: without it, classification falls back to nature/keywords only.",
     )
     p.add_argument(
+        "--class-cache",
+        type=Path,
+        default=None,
+        help="Persistent per-ledger LLM class-decision cache (default: "
+        "ledger_class_cache.json next to --ledgers). Re-runs are free.",
+    )
+    p.add_argument(
+        "--no-class-llm",
+        action="store_true",
+        help="Skip the LLM tier of ledger classification (deterministic group "
+        "tiers only; the residual stays 'review' for a human). Also honoured via "
+        "env TDS_DISABLE_LEDGER_CLASS_LLM=1.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Load master and report counts only; do not write JSON",
@@ -557,18 +572,30 @@ def main(argv: list[str] | None = None) -> int:
 
     # Authoritative per-ledger class (tds/gst/party/statutory/...) from the Tally
     # group structure — computed once over the full master, so a non-owner credit
-    # line still resolves. Deterministic (no LLM); the residual is "review".
+    # line still resolves. The group-based tiers are deterministic; whatever they
+    # cannot resolve ("review") then goes to the LLM tier, and only ledgers the
+    # LLM is NOT confident about are left "review" for the human Classify tab.
     ledger_classes: dict[str, str] = {}
     try:
-        from tds.classify_ledgers import classify_ledgers
-        ledger_classes = classify_ledgers(ledger_index, args.groups)
+        from tds.classify_ledgers import classify_ledgers, classify_review_with_llm
         from collections import Counter as _Counter
-        _dist = dict(_Counter(ledger_classes.values()))
-        print(f"Classified {len(ledger_classes)} ledgers: {_dist}", file=sys.stderr)
+        ledger_classes = classify_ledgers(ledger_index, args.groups)
+        print(f"Classified {len(ledger_classes)} ledgers (deterministic): "
+              f"{dict(_Counter(ledger_classes.values()))}", file=sys.stderr)
+        # LLM tier over the deterministic residual (unless disabled / no API). Any
+        # failure is swallowed inside classify_review_with_llm — residual stays
+        # 'review' for a human, never a crash.
+        if not args.no_class_llm and os.environ.get("TDS_DISABLE_LEDGER_CLASS_LLM", "") != "1":
+            cache = args.class_cache or (args.ledgers.parent / "ledger_class_cache.json")
+            ledger_classes, _rep = classify_review_with_llm(
+                ledger_classes, ledger_index, cache_path=cache,
+            )
+            print(f"Classified {len(ledger_classes)} ledgers (post-LLM): "
+                  f"{dict(_Counter(ledger_classes.values()))}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 — classification is best-effort
         print(
-            f"Warning: ledger classification failed ({exc}); entries will carry no "
-            "Ledger_class and the analyzer falls back to name heuristics.",
+            f"Warning: ledger classification failed ({exc}); entries carry the "
+            "deterministic class (or none) and the analyzer falls back to name heuristics.",
             file=sys.stderr,
         )
 

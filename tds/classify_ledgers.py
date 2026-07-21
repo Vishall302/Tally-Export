@@ -245,44 +245,208 @@ def classify_ledgers(
     }
 
 
-def refine_review_with_llm(
+# ── LLM tier: classify the deterministic REVIEW residual ─────────────────────
+# The classes the LLM may assign. It must be CONFIDENT; anything else stays
+# REVIEW and is escalated to the human "Classify ledgers" tab.
+_LLM_CLASSES = frozenset({PARTY, TDS, TCS, GST, STATUTORY, BANK, EXPENSE, INCOME, ASSET})
+
+
+def _llm_cache_key(name: str, group: str) -> str:
+    # Group is part of the key: the same name can mean different things under
+    # different groups across clients, and the cache may be shared.
+    return f"{name.lower()}||{group.lower()}"
+
+
+def _llm_system_prompt() -> str:
+    return (
+        "You are an expert in Indian accounting (Tally) and Indian Income-Tax TDS. "
+        "For each ledger you are given its NAME, its Tally PARENT GROUP, and its "
+        "nature. Decide WHAT KIND of account it is — pick exactly one class:\n\n"
+        "  party     — a real counter-party who is PAID: vendor, contractor, "
+        "professional, landlord, transporter, or an EMPLOYEE, or a debtor. TDS may apply.\n"
+        "  tds       — a TDS tax ledger (tax deducted at source; payable or receivable).\n"
+        "  tcs       — a TCS tax ledger (section 206C).\n"
+        "  gst       — a GST tax ledger (CGST/SGST/IGST/UGST input, output, RCM, cash/credit ledger).\n"
+        "  statutory — an impersonal statutory / adjustment POOL that is NOT a party and "
+        "NOT a specific tax subtype: PF/ESI/PT payable, gratuity/bonus provision, "
+        "round-off / excess-shortage, retention, 'Duties & Taxes' bucket, suspense.\n"
+        "  bank      — a bank or cash ledger.\n"
+        "  expense   — a Profit & Loss expense.\n"
+        "  income    — a Profit & Loss income.\n"
+        "  asset     — a balance-sheet asset that is neither a party nor a tax ledger: "
+        "prepaid, advance, deposit, fixed asset, loan given.\n\n"
+        "RULES\n"
+        "- Judge NAME and GROUP together; the group is a strong hint. Real books have "
+        "typos and abbreviations — judge by intent, never require exact spelling.\n"
+        "- A person's name, or a business marker (Pvt Ltd, LLP, & Co, & Associates, "
+        "Enterprises, Traders), is a PARTY even if grouped oddly.\n"
+        "- SAFETY BIAS: if you are torn between 'party' and 'statutory', choose 'party' — "
+        "wrongly calling a real payee 'statutory' hides a TDS liability. Wrongly calling a "
+        "pool 'party' only adds one review row.\n"
+        "- CONFIDENCE: set confident=false whenever you cannot decide the kind with high "
+        "certainty — those go to a human. Give a confident answer when name+group is clear; "
+        "only defer the genuinely ambiguous ones.\n\n"
+        "Return via record_classifications: one entry per input in the SAME order, "
+        "{name (verbatim, no [group] annotation), ledger_class (one of the 9, or 'unknown' "
+        "when not confident), confident}."
+    )
+
+
+def _llm_tool_schema() -> dict[str, Any]:
+    return {
+        "name": "record_classifications",
+        "description": "Record the ledger-kind classification for the batch. Call once "
+                       "with one entry per input name, preserving order.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"decisions": {"type": "array", "items": {"type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Ledger name verbatim, "
+                             "exactly as given before the [group: ...] annotation."},
+                    "ledger_class": {"type": "string", "enum": sorted(_LLM_CLASSES) + ["unknown"]},
+                    "confident": {"type": "boolean", "description": "True only if the kind "
+                                  "is clear; false sends the ledger to a human."},
+                },
+                "required": ["name", "ledger_class", "confident"]}}},
+            "required": ["decisions"],
+        },
+    }
+
+
+def _default_llm_call(batch: list[tuple[str, str, str]], *, api_key, model) -> list[dict]:
+    """One LLM call over (name, group, nature) triples → raw decision dicts.
+
+    Reuses the same client/thinking/forced-tool pattern as the party blocklist.
+    """
+    from tds.apply_party_blocklist import _make_client
+    from tds.apply_expense_blocklist import _thinking_config
+    import os
+
+    client = _make_client(api_key)
+    user_msg = (
+        f"Classify these {len(batch)} ledgers. Return one decision per ledger in the "
+        f"same order via record_classifications.\n\n" + "\n".join(
+            f"{i + 1}. {name} [group: {group or '(unknown)'}] [nature: {nature or '(unknown)'}]"
+            for i, (name, group, nature) in enumerate(batch)
+        )
+    )
+    run_id = os.environ.get("TDS_RUN_ID", "").strip()
+    extra = {"extra_headers": {"X-Run-Id": run_id}} if run_id else {}
+    message = client.messages.create(
+        model=model, max_tokens=8000, thinking=_thinking_config(model, False),
+        system=[{"type": "text", "text": _llm_system_prompt(),
+                 "cache_control": {"type": "ephemeral"}}],
+        tools=[_llm_tool_schema()],
+        tool_choice={"type": "tool", "name": "record_classifications"},
+        messages=[{"role": "user", "content": user_msg}], timeout=600.0, **extra,
+    )
+    block = next((b for b in message.content if getattr(b, "type", None) == "tool_use"), None)
+    if block is None:
+        raise RuntimeError(f"Model did not call the tool (stop={message.stop_reason!r})")
+    return (block.input or {}).get("decisions") or []
+
+
+def classify_review_with_llm(
     classes: dict[str, str],
     ledger_index: dict[str, dict[str, Any]],
     *,
     cache_path: Path | None = None,
     api_key: str | None = None,
-    fail_on_llm_error: bool = False,
-) -> dict[str, str]:
-    """Optionally re-classify only the REVIEW-class residual with the cached LLM.
+    model: str = "claude-haiku-4-5",
+    batch_size: int = 25,
+    llm_call=None,
+    progress: bool = True,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """LLM tier — resolve the deterministic REVIEW residual so only genuinely
+    ambiguous ledgers reach the human 'Classify ledgers' tab.
 
-    Reuses the party-blocklist LLM plumbing (name + parent group, on-disk cache).
-    Best-effort: on any LLM failure the residual stays REVIEW (safe). Returns the
-    updated class map. This is a thin, opt-in tier — the deterministic Tier 1/2
-    already resolves the overwhelming majority in real data.
+    For each ledger the deterministic tiers left as REVIEW, ask the model (name +
+    parent group + nature) for its kind. A CONFIDENT, valid verdict updates the
+    class; anything else (not confident / 'unknown' / invalid / LLM error) stays
+    REVIEW → escalated to a human. Per-ledger decisions are cached on disk
+    (keyed name||group), so re-runs are free. Returns ``(classes, report)``.
+
+    ``llm_call`` is injectable for tests: ``llm_call(batch) -> [{name,
+    ledger_class, confident}, ...]``. When None, the real cached Anthropic client
+    is used; if no API access is configured the residual is left untouched.
     """
     review_names = [n for n, c in classes.items() if c == REVIEW]
+    report = {"review_in": len(review_names), "resolved": 0, "escalated": 0,
+              "cache_hits": 0, "llm_error": None}
     if not review_names:
-        return classes
-    try:
-        from tds.apply_party_blocklist import (  # local import: optional dependency
-            _make_client, _cache_key,
-        )
-        from tds.apply_expense_blocklist import load_cache, save_cache
-    except Exception:  # noqa: BLE001
-        return classes
+        return classes, report
 
-    # The LLM here only decides party-vs-non-party; a "blocklisted" (non-party)
-    # verdict leaves the ledger as STATUTORY, "kept" (real payee) promotes to PARTY.
-    # Detailed tax-subtype refinement is left to the deterministic tiers. This keeps
-    # the LLM cheap and its failure mode safe. Deliberately minimal; extend later.
-    # (Implementation intentionally reuses the party-blocklist prompt/cache; wiring
-    #  it in the pipeline is gated by API availability.)
-    return classes  # placeholder wiring point — deterministic tiers are the default
+    from tds.apply_expense_blocklist import load_cache, save_cache
+    cache: dict[str, dict] = load_cache(cache_path) if cache_path else {}
+
+    def _fields(n):
+        f = ledger_index.get(n, {})
+        return (n, (f.get("PARENT") or "").strip(), (f.get("NATURE") or "").strip())
+
+    def _apply(n, verdict):
+        cls = str(verdict.get("ledger_class", "")).strip().lower()
+        if verdict.get("confident") and cls in _LLM_CLASSES:
+            classes[n] = cls
+            report["resolved"] += 1
+        else:
+            report["escalated"] += 1
+
+    todo: list[tuple[str, str, str]] = []
+    for n in review_names:
+        _, group, nature = _fields(n)
+        cached = cache.get(_llm_cache_key(n, group))
+        if cached is not None:
+            report["cache_hits"] += 1
+            _apply(n, cached)
+        else:
+            todo.append((n, group, nature))
+
+    if progress:
+        print(f"[classify_ledgers] LLM tier — review: {len(review_names)} | "
+              f"cache hits: {report['cache_hits']} | to classify: {len(todo)}",
+              file=sys.stderr)
+
+    if todo:
+        call = llm_call or (lambda b: _default_llm_call(b, api_key=api_key, model=model))
+        batches = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
+        for bi, batch in enumerate(batches):
+            try:
+                decisions = call(batch)
+            except Exception as exc:  # noqa: BLE001 — LLM failure must never crash export
+                report["llm_error"] = str(exc)
+                if progress:
+                    print(f"[classify_ledgers] LLM batch {bi + 1}/{len(batches)} failed "
+                          f"({exc}); leaving {len(batch)} ledger(s) for human review.",
+                          file=sys.stderr)
+                for n, _g, _nat in batch:
+                    report["escalated"] += 1
+                continue
+            by_name = {}
+            for d in decisions:
+                if isinstance(d, dict):
+                    nm = str(d.get("name", "")).split("[group:", 1)[0].strip()
+                    if nm:
+                        by_name[nm.lower()] = d
+            for n, group, _nat in batch:
+                v = by_name.get(n.lower(), {"ledger_class": "unknown", "confident": False})
+                _apply(n, v)
+                if cache_path is not None:
+                    cache[_llm_cache_key(n, group)] = {
+                        "ledger_class": str(v.get("ledger_class", "unknown")).strip().lower(),
+                        "confident": bool(v.get("confident")),
+                    }
+            if cache_path is not None:
+                save_cache(cache_path, cache)
+
+    if progress:
+        print(f"[classify_ledgers] LLM tier done — resolved: {report['resolved']} | "
+              f"escalated to human: {report['escalated']}", file=sys.stderr)
+    return classes, report
 
 
 __all__ = [
     "PARTY", "TDS", "TCS", "GST", "STATUTORY", "BANK",
     "EXPENSE", "INCOME", "ASSET", "REVIEW",
     "STATUTORY_OFFSET_CLASSES",
-    "classify_one", "classify_ledgers", "refine_review_with_llm",
+    "classify_one", "classify_ledgers", "classify_review_with_llm",
 ]
