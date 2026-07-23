@@ -105,23 +105,49 @@ def _class_from_group_name(parent_norm: str) -> str | None:
     return None
 
 
-def _tax_subtype(*texts: str) -> str | None:
-    """The GST/TCS/TDS subtype implied by any of *texts* (group and/or ledger
-    name), or None. Used ONLY once a ledger is already known to be in the
-    tax/statutory family (by group closure, group-name keyword, or TAXTYPE), so
-    reading the ledger's own name here is safe from vendor collisions — a vendor
-    ("TDS Engineering") is never in that family. GST is checked first so a
-    "GST-TDS" pool is treated as GST, not vendor TDS."""
-    for t in texts:
-        if t and _GST_GROUP_RE.search(t):
-            return GST
-    for t in texts:
-        if t and _TCS_GROUP_RE.search(t):
-            return TCS
-    for t in texts:
-        if t and _TDS_GROUP_RE.search(t):
-            return TDS
-    return None
+# Section-code disambiguators, evaluated ONLY inside the tax family. A LETTER
+# SUFFIX is REQUIRED on the 19x form (1-3 letters: 194c / 194j / 194ia / 194lba):
+# a specific section CODE is an unambiguous TDS signal. A BARE number ("195",
+# "194") is NOT — it also appears in interest / adjustment ledgers ("Interest u/s
+# 195" is the interest expense, not the tax), so relying on it would mislabel a
+# non-TDS ledger as tax withheld and over-count deductions. The word "TDS" (via
+# _TDS_GROUP_RE) remains the primary signal; real TDS ledgers carry it.
+_TDS_SECTION_RE = re.compile(r"\b19[2-9][a-z]{1,3}\b|\b206a[ab]\b")  # 194c/194ia/206AB -> TDS
+_TCS_SECTION_RE = re.compile(r"\b206c[a-z]?\b")                       # 206C/206CR       -> TCS
+
+
+def _subtype_of(text: str) -> str | None:
+    """The GST/TDS/TCS subtype implied by ONE text (a group OR a ledger name), or
+    None. GST is unambiguous vs TDS/TCS. If a text carries BOTH a TDS and a TCS
+    signal it is AMBIGUOUS (e.g. the group "TDS/TCS Payable") -> None, so a MORE
+    SPECIFIC source can decide. Representing that ambiguity — instead of a blind
+    GST>TCS>TDS token priority — is the whole point: it stops the shared parent
+    group from overriding a ledger whose own NAME says "TDS 194J"."""
+    if not text:
+        return None
+    if _GST_GROUP_RE.search(text):
+        return GST
+    tcs = bool(_TCS_GROUP_RE.search(text) or _TCS_SECTION_RE.search(text))
+    tds = bool(_TDS_GROUP_RE.search(text) or _TDS_SECTION_RE.search(text))
+    if tds and not tcs:
+        return TDS
+    if tcs and not tds:
+        return TCS
+    return None   # neither, or BOTH (ambiguous) -> defer to a more specific source
+
+
+def _resolve_tax_subtype(
+    name_norm: str, parent_norm: str, taxtype_norm: str,
+) -> str | None:
+    """Decide the tax subtype by SPECIFICITY, not blind token order. Evidence,
+    most specific first: the ledger's OWN NAME, then the (shared) PARENT group,
+    then Tally's TAXTYPE. First source that yields an UNAMBIGUOUS subtype wins;
+    if every source is silent or ambiguous, return None (caller -> STATUTORY)."""
+    return (
+        _subtype_of(name_norm)
+        or _subtype_of(parent_norm)
+        or _class_from_taxtype(taxtype_norm)
+    )
 
 
 def _class_from_taxtype(taxtype_norm: str) -> str | None:
@@ -206,14 +232,13 @@ def classify_one(
         # Liability/Asset (or blank) nature — the real tax/statutory family.
         # Refine the subtype so a TDS ledger is recognised as 'tds' (→ counted as
         # TDS deducted) even under the generic "Duties & Taxes"/"Provisions" group.
-        # Group/ledger NAME keyword FIRST — it is the reliable signal. Tally's
-        # TAXTYPE is only a fallback: in real books it is usually blank and is
-        # sometimes plain wrong (e.g. a "TDS Payable" ledger flagged TAXTYPE=GST),
-        # so it must never override an explicit TDS/GST name. Safe from vendor
+        # SPECIFICITY-ranked: the ledger's own NAME decides before the shared
+        # PARENT group, and a group naming BOTH taxes ("TDS/TCS Payable") is
+        # ambiguous — so it can't override a name that says "TDS 194J". TAXTYPE is
+        # the weakest fallback (usually blank, sometimes wrong). Safe from vendor
         # collisions: tax-family membership is already established.
         return (
-            _tax_subtype(parent_norm, name_norm)
-            or by_taxtype
+            _resolve_tax_subtype(name_norm, parent_norm, taxtype_norm)
             or STATUTORY
         )
 
