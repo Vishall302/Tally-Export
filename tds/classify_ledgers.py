@@ -181,13 +181,29 @@ def classify_one(
     # Provisions closures, a tax/statutory group-name keyword, or Tally's TAXTYPE.
     by_taxtype = _class_from_taxtype(taxtype_norm)
     by_group_name = _class_from_group_name(parent_norm)
+    in_closure = parent in closures["tax"] or parent in closures["provision"]
     in_tax_family = (
-        parent in closures["tax"]
-        or parent in closures["provision"]
+        in_closure
         or by_group_name is not None
         or by_taxtype is not None
     )
     if in_tax_family:
+        # ── NATURE veto ──────────────────────────────────────────────────────
+        # A statutory/tax OFFSET is a balance-sheet (Liability/Asset) concept. A
+        # ledger whose Tally NATURE is a P&L Expense/Income is base-eligible by
+        # definition and can NEVER be an offset — so a fuzzy tax-family signal must
+        # not demote it. This is the durable fix for the "provision" substring
+        # matching the STANDARD EXPENSE group "Payment to and Provision for
+        # Employees" (Staff Uniform, Staff Salary, Staff Welfare, Exgratia…): a
+        # group NAME keyword or TAXTYPE can never override NATURE for a P&L line.
+        # A reserved Duties&Taxes/Provisions CLOSURE membership that still
+        # contradicts a P&L nature is a genuine conflict → REVIEW (CA decides),
+        # never a silent statutory tag that would erase the TDS base.
+        if nature == "expense":
+            return REVIEW if in_closure else EXPENSE
+        if nature == "income":
+            return REVIEW if in_closure else INCOME
+        # Liability/Asset (or blank) nature — the real tax/statutory family.
         # Refine the subtype so a TDS ledger is recognised as 'tds' (→ counted as
         # TDS deducted) even under the generic "Duties & Taxes"/"Provisions" group.
         # Group/ledger NAME keyword FIRST — it is the reliable signal. Tally's
